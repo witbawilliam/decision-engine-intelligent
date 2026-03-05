@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=admin
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=automl_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d automl_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+
+  api:
+    build:
+      context: .
+      target: runtime
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql://admin:password@db:5432/automl_db
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: celery -A workers.celery_app worker --loglevel=info --concurrency=4 -Ofair
+    stop_signal: SIGTERM
+    shm_size: '2gb'
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=postgresql://admin:password@db:5432/automl_db
+      - REDIS_URL=redis://redis:6379/0
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      redis:
+        condition: service_healthy

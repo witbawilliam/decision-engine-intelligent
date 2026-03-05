@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+polars
+xgboost
+prophet
+scikit-learn
+celery
+redis
+psycopg2-binary
+pytest

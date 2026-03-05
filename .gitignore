@@ -1,1 +1,25 @@
 __pycache__/\n.env\n*.pyc
+cat <<EOF > .gitignore
+# Environments
+venv/
+.env
+
+# Models & Large Artifacts
+ml_registry/
+artifacts/
+*.pkl
+*.model
+
+# Python Junk
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Data
+data/
+*.csv
+*.parquet
+EOF

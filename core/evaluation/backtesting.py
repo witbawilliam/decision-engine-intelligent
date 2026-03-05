@@ -10,7 +10,7 @@ import polars as pl
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-#  Logger Configuration 
+#  Logger Configuration
 logger = logging.getLogger(__name__)
 
 #  Protocol for Type-Safe Models 

@@ -1,3 +1,6 @@
+
+
+
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
@@ -6,13 +9,46 @@ build-backend = "setuptools.build_meta"
 name = "automl_platform"
 version = "0.1.0"
 description = "Production Grade AI Data Analyst System"
+readme = "README.md"
+requires-python = ">=3.10"
 dependencies = [
-    "polars",
-    "pydantic",
-    "pytest",
-    "fastapi"
+    "polars>=1.0.0",
+    "pydantic>=2.0.0",
+    "celery>=5.3.0",
+    "redis>=5.0.0",
+    "python-json-logger",
+    "fastapi",
+    "uvicorn"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-cov",
+    "pytest-sugar",
+    "pytest-mock",
+    "httpx"
+]
+ml = [
+    "prophet",
+    "scikit-learn",
+    "xgboost"
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["core*", "app*", "workers*"]
+include = ["core*", "app*", "workers*", "monitoring*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra --showlocals --durations=5"
+
+[tool.coverage.run]
+# Track which lines of your workers and monitoring code are actually tested
+source = ["workers", "monitoring", "core"]
+omit = ["tests/*", "**/__init__.py"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80  # Enterprise standard: CI fails if coverage drops below 80%

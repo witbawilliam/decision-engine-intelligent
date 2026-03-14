@@ -1,68 +1,96 @@
 import pytest
-from datetime import datetime, timedelta
-from core.evaluation.backtesting import TimeSeriesBacktester, BacktestResult
-import numpy as np
 import polars as pl
+import numpy as np
+from typing import Any
+from unittest.mock import MagicMock
+from core.evaluation.backtesting import TimeSeriesBacktester
 
-@pytest.fixture
-def time_series_data():
-    """
-    Creates a dataset where the first half has a mean of 10
-    and the second half has a mean of 100 (Regime Shift).
-    """
-    dates = [datetime(2023, 1, 1) + timedelta(days=i) for i in range(100)]
-    # Regime 1: Low values
-    targets = [10.0 + np.random.normal(0, 1) for _ in range(50)]
-    # Regime 2: High values
-    targets += [100.0 + np.random.normal(0, 1) for _ in range(50)]
-    
-    return pl.DataFrame({
-        "timestamp": dates,
-        "target": targets
-    })
+class MockModel:
+    """Mock model for fast backtesting tests."""
+    def fit(self, df: pl.DataFrame) -> None:
+        pass  # Training simulation
 
-def test_expanding_window_execution(time_series_data):
-    tester = TimeSeriesBacktester(
-        df=time_series_data,
-        datetime_column="timestamp",
-        target_column="target",
-        forecast_horizon=5
-    )
-    
-    result = tester.run_backtest(
-        strategy="expanding",
-        model_factory=model_factory,
-        initial_train_size=20,
-        step=10
-    )
-    
-    assert isinstance(result, BacktestResult)
-    assert len(result.fold_metrics) > 0
-    assert result.avg_mae > 0
-    assert result.execution_time_sec > 0
+    def predict(self, horizon: int) -> np.ndarray:
+        # Return dummy predictions equal to the horizon length
+        return np.array([1.0] * horizon)
 
-def test_regime_change_detection(time_series_data):
-    """
-    In this test, the Sliding window should outperform the Expanding window
-    because the 'Expanding' window is polluted by the old 'Regime 1' (mean 10) 
-    data while trying to predict 'Regime 2' (mean 100).
-    """
-    tester = TimeSeriesBacktester(
-        df=time_series_data,
-        datetime_column="timestamp",
-        target_column="target",
-        forecast_horizon=5
-    )
+def model_factory():
+    return MockModel()
+
+
+class TestTimeSeriesBacktester:
     
-    # We test on the latter half of the data
-    # Sliding window only sees the recent '100' mean data
-    # Expanding window still sees the early '10' mean data
-    exp_res = tester.run_backtest("expanding", model_factory, initial_train_size=60, step=5)
-    sli_res = tester.run_backtest("sliding", model_factory, window_size=10, step=5)
-    
-    comparison = tester.analyze_regime_change(exp_res, sli_res)
-    
-    # Assertions
-    assert comparison.winning_strategy == "sliding"
-    # Because the mean jumped from 10 to 100, the gap will be massive
-    assert comparison.drift_detected is True
+    @pytest.fixture
+    def sample_data(self):
+        """Creates 100 rows of synthetic time series data."""
+        return pl.DataFrame({
+            "ds": pl.date_range(start=np.datetime64("2026-01-01"), 
+                               end=np.datetime64("2026-04-10"), 
+                               interval="1d", eager=True),
+            "y": np.random.normal(10, 1, 100)
+        })
+
+    def test_expanding_window_generation(self, sample_data):
+        """Verify that expanding windows grow and don't leak data."""
+        tester = TimeSeriesBacktester(sample_data, "ds", "y", forecast_horizon=5)
+        
+        # Test 1: Initial training size of 20, step of 10
+        folds = list(tester._generate_folds("expanding", initial_size=20, window_size=None, step=10))
+        
+        # Check first fold
+        train_1, test_1 = folds[0]
+        assert train_1.height == 20
+        assert test_1.height == 5
+        # Ensure temporal continuity: test starts exactly after train ends
+        assert train_1["ds"][-1] < test_1["ds"][0]
+
+        # Check second fold (should have expanded)
+        train_2, test_2 = folds[1]
+        assert train_2.height == 30 
+        assert train_2[:20].equals(train_1)
+
+    def test_sliding_window_generation(self, sample_data):
+        """Verify sliding windows maintain a fixed size."""
+        tester = TimeSeriesBacktester(sample_data, "ds", "y", forecast_horizon=5)
+        window_size = 20
+        
+        folds = list(tester._generate_folds("sliding", initial_size=None, window_size=window_size, step=10))
+        
+        train_1, _ = folds[0]
+        train_2, _ = folds[1]
+        
+        assert train_1.height == window_size
+        assert train_2.height == window_size
+        # In sliding, the start of train_2 should be 10 steps ahead of train_1
+        assert train_2["ds"][0] > train_1["ds"][0]
+
+    def test_run_backtest_full_cycle(self, sample_data):
+        """Tests the end-to-end run_backtest execution."""
+        tester = TimeSeriesBacktester(sample_data, "ds", "y", forecast_horizon=2)
+        
+        result = tester.run_backtest(
+            strategy="expanding",
+            model_factory=model_factory,
+            initial_train_size=80,
+            step=5
+        )
+        
+        assert isinstance(result.avg_mae, float)
+        assert len(result.fold_metrics) > 0
+        assert result.execution_time_sec > 0
+        assert result.strategy == "expanding"
+
+    def test_analyze_regime_change_detection(self):
+        """Tests the logic that detects environment shifts."""
+        minimal_df = pl.DataFrame({"ds": [], "y": []}) 
+        tester = TimeSeriesBacktester(minimal_df, "ds", "y", 5)
+        
+        # Scenario: Sliding is much better than Expanding (Drift)
+        exp_res = MagicMock(avg_mae=10.0)
+        slid_res = MagicMock(avg_mae=5.0) # 50% better
+        
+        comparison = tester.analyze_regime_change(exp_res, slid_res)
+        
+        assert comparison.drift_detected is True
+        assert comparison.winning_strategy == "sliding"
+        assert comparison.performance_gap == 0.5

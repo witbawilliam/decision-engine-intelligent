@@ -15,9 +15,6 @@ from core.models.prophet_model import (
 )
 
 
-# ---------------------------------------------------------------------------
-# FIXTURES
-# ---------------------------------------------------------------------------
 
 def make_daily_df(n: int = 365, seed: int = 0) -> pd.DataFrame:
     """Clean synthetic daily sales series."""
@@ -68,9 +65,6 @@ def fitted_model(daily_df):
     return model
 
 
-# ---------------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------------
 
 def _make_forecast_df(n: int = 10) -> pd.DataFrame:
     """Minimal Prophet-style forecast output."""
@@ -84,9 +78,6 @@ def _make_forecast_df(n: int = 10) -> pd.DataFrame:
     })
 
 
-# =============================================================================
-# 1. INITIALISATION
-# =============================================================================
 
 class TestInit:
 
@@ -142,9 +133,6 @@ class TestInit:
         assert m.changepoint_prior_scale == 0.1
 
 
-# =============================================================================
-# 2. _to_prophet_df()
-# =============================================================================
 
 class TestToProphetDf:
 
@@ -211,9 +199,6 @@ class TestToProphetDf:
         assert len(df) == len(daily_df)
 
 
-# =============================================================================
-# 3. _build_prophet()
-# =============================================================================
 
 class TestBuildProphet:
 
@@ -254,10 +239,6 @@ class TestBuildProphet:
         call_kwargs = MockProphet.call_args[1]
         assert call_kwargs["seasonality_mode"] == "additive"
 
-
-# =============================================================================
-# 4. fit()
-# =============================================================================
 
 class TestFit:
 
@@ -329,9 +310,6 @@ class TestFit:
         assert m._is_fitted is True
 
 
-# =============================================================================
-# 5. make_future_dataframe()
-# =============================================================================
 
 class TestMakeFutureDataframe:
 
@@ -377,9 +355,6 @@ class TestMakeFutureDataframe:
         assert call_kwargs["include_history"] is True
 
 
-# =============================================================================
-# 6. predict()
-# =============================================================================
 
 class TestPredict:
 
@@ -481,9 +456,6 @@ class TestPredict:
         assert "promo" in result.regressor_cols
 
 
-# =============================================================================
-# 7. ForecastResult.to_dict()
-# =============================================================================
 
 class TestForecastResultToDict:
 
@@ -520,9 +492,6 @@ class TestForecastResultToDict:
         assert d["regressor_cols"] == ["promo"]
 
 
-# =============================================================================
-# 8. cross_validate() / cross_validation_metrics()
-# =============================================================================
 
 class TestCrossValidation:
 
@@ -620,9 +589,6 @@ class TestCrossValidation:
         assert call_kwargs["parallel"] == "processes"
 
 
-# =============================================================================
-# 9. save() / load()
-# =============================================================================
 
 class TestSaveLoad:
 
@@ -687,9 +653,6 @@ class TestSaveLoad:
         assert loaded.model_id == m.model_id
 
 
-# =============================================================================
-# 10. _assert_fitted() GUARD
-# =============================================================================
 
 class TestAssertFitted:
 
@@ -725,10 +688,6 @@ class TestAssertFitted:
             m._assert_fitted("make_future_dataframe")
 
 
-# =============================================================================
-# 11. __repr__()
-# =============================================================================
-
 class TestRepr:
 
     def test_repr_shows_unfitted_before_fit(self):
@@ -754,9 +713,6 @@ class TestRepr:
         assert m.model_id[:8] in repr(m)
 
 
-# =============================================================================
-# 12. EDGE CASES & PRODUCTION RESILIENCE
-# =============================================================================
 
 class TestEdgeCases:
 

@@ -19,7 +19,7 @@ class ForecastMetricResult:
     mase: Optional[float]
     wape: float
     r2: Optional[float]
-    bias: float               # Added: Directional error
+    bias: float               
     coverage_80: Optional[float] = None # Added: Probabilistic quality
 
     def to_dict(self) -> Dict[str, float]:
@@ -111,7 +111,7 @@ class ForecastingMetrics:
         mask = denominator > 1e-9
         if not np.any(mask):
             return 0.0
-        # Formula: 200 * avg(|y - y_hat| / (|y| + |y_hat|))
+
         return float(200.0 * np.mean(np.abs(y_true[mask] - y_pred[mask]) / denominator[mask]))
 
     def _wape(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -143,6 +143,6 @@ class ForecastingMetrics:
         scale = np.mean(naive_error)
 
         if scale < 1e-9:
-            return None # Training data is constant/periodic zero
+            return None 
 
         return float(np.mean(np.abs(y_true - y_pred)) / scale)

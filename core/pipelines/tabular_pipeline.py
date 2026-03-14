@@ -17,9 +17,22 @@ from core.evaluation.feature_importance import XGBExplainer
 from core.drift.drift_detector import DriftDetector
 from core.contracts.problem_type import ProblemType
 from sklearn.preprocessing import LabelEncoder
+from core.models.model_registry import ModelRegistry
 import pandas as pd
+from dataclasses import dataclass, asdict
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class PipelineResult:
+    status: str
+    model_name: str
+    model_version: str
+    metrics: Dict[str, float]
+    artifacts_path: str
+    feature_columns: List[str]
+    metadata: Dict[str, Any]
 
 
 class TabularPipeline(BasePipeline):
@@ -27,6 +40,49 @@ class TabularPipeline(BasePipeline):
     Enterprise-Grade Tabular ML Pipeline
     Fully modular, contract-driven, and production-aligned.
     """
+
+    def execute_pipeline(self, model_name: str) -> PipelineResult:
+        """
+        The entry point for the pipeline execution.
+        This orchestrates the private methods in the correct order.
+        """
+        logger.info(f"Starting pipeline execution for model: {model_name}")
+
+        try:
+            # Execution Flow
+            self._detect_problem_type()
+            self._validate()
+            self._feature_engineering()
+            self._split()
+            self._train()
+            
+            # Evaluation
+            final_metrics = self._evaluate_final()
+            
+            # Persistence
+            # Assuming your save_to_registry returns the registration info
+            registration = self.save_to_registry(model_name=model_name)
+
+            # Construct the Contract
+            result = PipelineResult(
+                status="SUCCESS",
+                model_name=model_name,
+                model_version=str(registration.get("version", "unknown")),
+                metrics=final_metrics,
+                artifacts_path=registration.get("path", ""),
+                feature_columns=self.feature_columns,
+                metadata={
+                    "problem_type": self.problem_type.name,
+                    "is_drifted": self._check_drift()["is_drifted"]
+                }
+            )
+            
+            logger.info(f"Pipeline finished successfully for {model_name}")
+            return result
+
+        except Exception as e:
+            logger.error(f"Pipeline failed: {str(e)}")
+            raise e
 
     
     
@@ -245,7 +301,7 @@ class TabularPipeline(BasePipeline):
     
     def _post_training_analysis(self) -> Dict[str, Any]:
         analyzer = XGBExplainer(
-            self.model.model,   # Pass real XGBClassifier/XGBRegressor
+            self.model.model,   
             feature_names=self.feature_columns
         )
 
@@ -282,3 +338,28 @@ class TabularPipeline(BasePipeline):
             "categorical_features": self.categorical_features,
             "preprocessing_metadata": self.preprocessing_metadata,
         }
+    
+
+    def save_to_registry(self, model_name: str, registry_path: str = "ml_registry"):
+        """
+        Connects the Pipeline results to the Model Registry.
+        """
+        # 1. Initialize Registry
+        registry = ModelRegistry(base_path=registry_path)
+        
+        # 2. Collect artifacts and metrics
+        artifacts = self._collect_artifacts()
+        final_metrics = self._evaluate_final()
+        
+        
+        registration_result = registry.register(
+            model=self.model,
+            model_name=model_name,
+            metrics=final_metrics,
+            parameters=self.model.model.get_params() if hasattr(self.model.model, 'get_params') else {},
+            problem_type=self.problem_type.name,
+            stage="staging"
+        )
+
+        logger.info(f"Model successfully registered: {model_name} v{registration_result['version']}")
+        return registration_result

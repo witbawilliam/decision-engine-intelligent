@@ -99,13 +99,36 @@ class TemporalPipeline(BasePipeline):
     End-to-end forecasting pipeline.
 
     Execution order (enforced by BasePipeline._execution_plan):
-      1. _validate            – quality gate + schema check + circuit breaker
-      2. _detect_problem_type – sets ProblemType.FORECASTING
-      3. _feature_engineering – temporal decomposition + preprocessing
-      4. _split               – chronological train / test split
-      5. _train               – fit ProphetModel
-      [evaluation]            – ForecastingMetrics on held-out window
+      1. _validate            quality gate + schema check + circuit breaker
+      2. _detect_problem_type sets ProblemType.FORECASTING
+      3. _feature_engineering  temporal decomposition + preprocessing
+      4. _split               chronological train / test split
+      5. _train               fit ProphetModel
+      [evaluation]            ForecastingMetrics on held-out window
     """
+
+
+
+    # Add this method to your TemporalPipeline class
+    def run(self) -> PipelineResult:
+        """Orchestrates the temporal pipeline and returns the standard result."""
+        self._detect_problem_type()
+        self._validate()
+        self._feature_engineering()
+        self._split()
+        self._train()
+        
+        metrics = self._evaluate_final()
+        
+        # Use the metadata from the registry if available, else local state
+        return PipelineResult(
+            status="SUCCESS",
+            model_name=self._registry_metadata.get("model_name", f"prophet_{self.experiment_id}"),
+            model_version=str(self._registry_metadata.get("version", "1")),
+            metrics=metrics,
+            artifacts_path=self._registry_metadata.get("path", self.config.registry_path),
+            feature_columns=self.features
+        )
 
     def __init__(
         self,

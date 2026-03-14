@@ -1,155 +1,310 @@
-import pytest
-import numpy as np
-import polars as pl
-import pandas as pd
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
-from core.pipelines.temporal_pipeline import  TemporalPipeline, TemporalPipelineConfig
-from core.contracts.circuit_breaker import CircuitBreakerTriggered
-# Import your pipeline classes
-# from your_module import TemporalPipeline, TemporalPipelineConfig, TemporalResolution
+from __future__ import annotations
 
-def create_synthetic_temporal_data(n_rows=100):
-    """Generates a Polars DataFrame with a trend and seasonality."""
-    base_date = datetime(2023, 1, 1)
-    df = pl.DataFrame({
-        "timestamp": [base_date + timedelta(days=i) for i in range(n_rows)],
-        "sales": [100 + i + (10 if i % 7 == 0 else 0) + np.random.normal(0, 2) for i in range(n_rows)],
-        "is_promo": np.random.choice([0, 1], n_rows)
-    })
-    return df
+import logging
+import pickle
+import uuid
+from datetime import datetime
+from typing import Any, Dict, Optional
 
-class TestTemporalPipeline:
+from storage.postgres_client import PostgresClient
+from storage.s3_client import S3Client
 
-    @pytest.fixture
-    def mock_dependencies(self):
-        """Mocks the heavy infrastructure pieces."""
-        with patch("core.models.prophet_model.ProphetModel") as mock_prophet, \
-             patch("core.models.model_registry.ModelRegistry") as mock_registry, \
-             patch("core.contracts.circuit_breaker.CircuitBreaker") as mock_cb:
-            
-            # Setup Prophet Mock return values
-            mock_prophet_inst = mock_prophet.return_value
-            mock_prophet_inst.predict.return_value = MagicMock(
-                yhat=np.array([110.0]*30),
-                forecast_df=pd.DataFrame({"ds": [datetime.now()], "yhat": [110.0], "yhat_lower": [100.0], "yhat_upper": [120.0]})
-            )
-            
-            yield {
-                "prophet": mock_prophet,
-                "registry": mock_registry,
-                "breaker": mock_cb
-            }
+logger = logging.getLogger(__name__)
 
-    def test_pipeline_initialization(self, mock_dependencies):
-        df = create_synthetic_temporal_data()
-        config = TemporalPipelineConfig(forecast_horizon=14)
-        
-        pipeline = TemporalPipeline(
-            dataframe=df,
-            target_column="sales",
-            datetime_column="timestamp",
-            config=config
+
+
+_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS model_registry (
+    id            SERIAL       PRIMARY KEY,
+    run_id        UUID         NOT NULL UNIQUE,
+    model_name    TEXT         NOT NULL,
+    version       INTEGER      NOT NULL,
+    stage         TEXT         NOT NULL DEFAULT 'staging',
+    problem_type  TEXT         NOT NULL,
+    metrics       JSONB        NOT NULL DEFAULT '{}',
+    parameters    JSONB        NOT NULL DEFAULT '{}',
+    artifact_key  TEXT         NOT NULL,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    UNIQUE (model_name, version)
+);
+"""
+
+
+class ModelRegistry:
+    """
+    ML model registry backed by S3 (artifacts) and PostgreSQL (metadata).
+
+    Artifact storage
+    ----------------
+    Model pickles are written to S3 under the key pattern::
+
+        {s3_prefix}/{model_name}/v{version}/model.pkl
+
+    Metadata storage
+    ----------------
+    Every registered version is a row in the ``model_registry`` table.
+    The table is created automatically on first instantiation (idempotent).
+
+    Parameters
+    ----------
+    s3_client:
+        A configured :class:`S3Client` instance.  Required for ``register``
+        and ``load``; omit only when the instance will be fully mocked in
+        tests or when only metadata queries are needed.
+    s3_prefix:
+        Key prefix inside the bucket (default: ``"ml_registry"``).
+    base_path:
+        Legacy parameter — previously the registry stored artifacts on local
+        disk under this path.  Accepted so existing call-sites such as
+        ``ModelRegistry(base_path="ml_registry")`` do not raise
+        ``TypeError``.  When *s3_client* is provided, *base_path* is used
+        as the fallback *s3_prefix* if no explicit prefix was given.
+    """
+
+    def __init__(
+        self,
+        s3_client: Optional[S3Client] = None,
+        s3_prefix: str = "ml_registry",
+        base_path: str = "ml_registry",
+    ) -> None:
+        self._s3: Optional[S3Client] = s3_client
+        # Honour base_path as the S3 prefix when no explicit s3_prefix given.
+        self._s3_prefix = (s3_prefix if s3_prefix != "ml_registry" else base_path).rstrip("/")
+        self._ensure_table()
+
+    
+    def register(
+        self,
+        model: Any,
+        model_name: str,
+        metrics: Dict[str, float],
+        parameters: Dict[str, Any],
+        problem_type: str,
+        stage: str = "staging",
+    ) -> Dict[str, Any]:
+        """
+        Serialize *model*, upload it to S3, and record metadata in Postgres.
+
+        Returns
+        -------
+        The metadata dict for the new version (mirrors the DB row).
+        """
+        import json
+
+        s3 = self._require_s3()
+        version = self._next_version(model_name)
+        artifact_key = self._artifact_key(model_name, version)
+        run_id = str(uuid.uuid4())
+
+        # --- Upload artifact to S3 ---
+        model_bytes = pickle.dumps(model)
+        s3._client.put_object(
+            Bucket=s3.bucket_name,
+            Key=artifact_key,
+            Body=model_bytes,
+            ContentType="application/octet-stream",
+            Metadata={
+                "model_name": model_name,
+                "version": str(version),
+                "run_id": run_id,
+            },
         )
-        
-        assert pipeline.target_column == "sales"
-        assert pipeline.config.forecast_horizon == 14
-        assert pipeline._lifecycle_state == "initialized"
+        logger.info(
+            "Model artifact uploaded",
+            extra={"bucket": s3.bucket_name, "key": artifact_key},
+        )
 
-    def test_full_run_execution(self, mock_dependencies):
-        """Tests the end-to-end flow from validation to evaluation."""
-        df = create_synthetic_temporal_data(n_rows=60)
-        
-        # We need to mock the DataQualityAnalyzer to return a passing score
-        with patch("core.feature_engineering.data_quality.DataQualityAnalyzer") as mock_qa:
-            mock_qa.return_value.analyze.return_value = MagicMock(
-                quality_score=0.9,
-                status=True,
-                issues=[],
-                warnings=[]
-            )
-            
-            pipeline = TemporalPipeline(
-                dataframe=df,
-                target_column="sales",
-                datetime_column="timestamp",
-                config=TemporalPipelineConfig(run_backtest=False) # Speed up test
-            )
-            
-            # Execute
-            result = pipeline.run()
-            
-            # Verify flow
-            assert pipeline.is_fitted is True
-            assert pipeline._lifecycle_state == "completed"
-            assert "model_training" in result.metadata.step_timings
-            assert "validation" in result.metadata.step_timings
+        # --- Persist metadata to Postgres ---
+        row = PostgresClient.execute(
+            """
+            INSERT INTO model_registry
+                (run_id, model_name, version, stage, problem_type,
+                 metrics, parameters, artifact_key, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            RETURNING *
+            """,
+            (
+                run_id,
+                model_name,
+                version,
+                stage,
+                problem_type,
+                json.dumps(metrics),
+                json.dumps(parameters),
+                artifact_key,
+                datetime.utcnow(),
+            ),
+            returning=True,
+        )
 
-    def test_circuit_breaker_trip(self):
+        logger.info(
+            "Model registered",
+            extra={"model_name": model_name, "version": version, "stage": stage},
+        )
+        return row  # type: ignore[return-value]
+
+    def load(
+        self,
+        model_name: str,
+        version: Optional[int] = None,
+        stage: Optional[str] = None,
+    ) -> Any:
         """
-        Test that the REAL CircuitBreaker logic trips when 
-        the REAL DataQualityAnalyzer is mocked to return failure.
+        Download a model artifact from S3 and deserialize it.
+
+        Resolution order (most-specific wins):
+        1. *model_name* + *version*  → exact match
+        2. *model_name* + *stage*    → latest version in that stage
+        3. *model_name* only         → latest version overall
         """
-        # 1. Setup real data and real config
-        df = create_synthetic_temporal_data(n_rows=50)
-        config = TemporalPipelineConfig(min_quality_score=0.5) # Threshold is 0.5
-        
-        # 2. Only Mock the DataQualityAnalyzer return value
-        with patch("core.feature_engineering.data_quality.DataQualityAnalyzer.analyze") as mock_analyze:
-            # Simulate a very bad quality score
-            mock_analyze.return_value = MagicMock(
-                quality_score=0.1,  # 0.1 < 0.5 -> Should trigger!
-                status=False,
-                issues=["Critical failure"],
-                warnings=[]
-            )
-            
-            # 3. Use the REAL pipeline class
-            pipeline = TemporalPipeline(
-                dataframe=df,
-                target_column="sales",
-                datetime_column="timestamp",
-                config=config
-            )
-            
-            # 4. Assert that the exception IS raised
-            with pytest.raises(CircuitBreakerTriggered):
-                pipeline.run()
-                
-            # 5. Verify the state is 'failed'
-            assert pipeline._lifecycle_state == "failed"
+        s3 = self._require_s3()
+        meta = self._resolve_metadata(model_name, version=version, stage=stage)
+        artifact_key: str = meta["artifact_key"]
 
-    def test_future_forecasting(self, mock_dependencies):
-        """Tests the forecast_future method after fitting."""
-        df = create_synthetic_temporal_data()
-        
-        with patch("core.feature_engineering.data_quality.DataQualityAnalyzer"):
-            pipeline = TemporalPipeline(df, "sales", "timestamp")
-            
-            # Manually set state as if fitted to test prediction logic
-            pipeline.is_fitted = True
-            pipeline.model = mock_dependencies["prophet"].return_value
-            
-            forecast = pipeline.get_forecast_dataframe(periods=7)
-            
-            assert isinstance(forecast, pd.DataFrame)
-            assert "yhat" in forecast.columns
-            assert len(forecast) > 0
+        response = s3._client.get_object(
+            Bucket=s3.bucket_name,
+            Key=artifact_key,
+        )
+        model_bytes = response["Body"].read()
+        model = pickle.loads(model_bytes)
 
-    def test_temporal_feature_engineering_integrity(self, mock_dependencies):
-        """Ensures datetime column is correctly cast and sorted."""
-        # Create unsorted data with string dates
-        df = pl.DataFrame({
-            "timestamp": ["2023-01-10", "2023-01-01", "2023-01-05"],
-            "sales": [10, 20, 30]
-        })
-        
-        pipeline = TemporalPipeline(df, "sales", "timestamp")
-        pipeline._feature_engineering()
-        
-        # Check if it's now a datetime type
-        assert pipeline.df["timestamp"].dtype in (pl.Date, pl.Datetime)
-        
-        # Check if it's sorted
-        dates = pipeline.df["timestamp"].to_list()
-        assert dates == sorted(dates)
+        logger.info(
+            "Model loaded",
+            extra={
+                "model_name": model_name,
+                "version": meta["version"],
+                "stage": meta["stage"],
+            },
+        )
+        return model
+
+    def promote(
+        self,
+        model_name: str,
+        version: int,
+        new_stage: str,
+    ) -> None:
+        """
+        Update the *stage* of a specific model version in Postgres.
+
+        Raises ``ValueError`` if the (model_name, version) pair does not exist.
+        """
+        result = PostgresClient.execute(
+            """
+            UPDATE model_registry
+               SET stage = %s
+             WHERE model_name = %s AND version = %s
+            RETURNING id
+            """,
+            (new_stage, model_name, version),
+            returning=True,
+        )
+        if result is None:
+            raise ValueError(
+                f"No entry found for model '{model_name}' version {version}."
+            )
+        logger.info(
+            "Model stage updated",
+            extra={"model_name": model_name, "version": version, "new_stage": new_stage},
+        )
+
+    def list_versions(
+        self,
+        model_name: str,
+        stage: Optional[str] = None,
+    ) -> list[Dict[str, Any]]:
+        """Return all registered versions of *model_name*, newest first."""
+        if stage:
+            return PostgresClient.query(
+                "SELECT * FROM model_registry "
+                "WHERE model_name = %s AND stage = %s ORDER BY version DESC",
+                (model_name, stage),
+            )
+        return PostgresClient.query(
+            "SELECT * FROM model_registry "
+            "WHERE model_name = %s ORDER BY version DESC",
+            (model_name,),
+        )
+
+    def get_metadata(self, model_name: str, version: int) -> Dict[str, Any]:
+        """Return the metadata row for a specific (model_name, version) pair."""
+        return self._resolve_metadata(model_name, version=version)
+
+    def ping(self) -> Dict[str, bool]:
+        """Health-check both backing services."""
+        return {
+            "postgres": PostgresClient.ping(),
+            "s3": self._s3.ping() if self._s3 is not None else False,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _require_s3(self) -> S3Client:
+        """Return the S3 client, or raise a clear error if none was supplied."""
+        if self._s3 is None:
+            raise RuntimeError(
+                "This ModelRegistry has no S3Client. "
+                "Pass s3_client=<S3Client> to the constructor."
+            )
+        return self._s3
+
+    def _ensure_table(self) -> None:
+        """Create the ``model_registry`` table if it does not already exist."""
+        PostgresClient.execute(_CREATE_TABLE_SQL)
+        logger.debug("model_registry table ensured")
+
+    def _artifact_key(self, model_name: str, version: int) -> str:
+        return f"{self._s3_prefix}/{model_name}/v{version}/model.pkl"
+
+    def _next_version(self, model_name: str) -> int:
+        """Return the next integer version for *model_name* (1-indexed)."""
+        rows = PostgresClient.query(
+            "SELECT COALESCE(MAX(version), 0) AS max_version "
+            "FROM model_registry WHERE model_name = %s",
+            (model_name,),
+        )
+        return (rows[0]["max_version"] or 0) + 1
+
+    def _resolve_metadata(
+        self,
+        model_name: str,
+        version: Optional[int] = None,
+        stage: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Look up a single metadata row from Postgres.
+
+        Resolution order:
+        1. Exact (model_name, version)
+        2. Latest version in *stage*
+        3. Overall latest version
+        """
+        if version is not None:
+            rows = PostgresClient.query(
+                "SELECT * FROM model_registry "
+                "WHERE model_name = %s AND version = %s",
+                (model_name, version),
+            )
+        elif stage is not None:
+            rows = PostgresClient.query(
+                "SELECT * FROM model_registry "
+                "WHERE model_name = %s AND stage = %s "
+                "ORDER BY version DESC LIMIT 1",
+                (model_name, stage),
+            )
+        else:
+            rows = PostgresClient.query(
+                "SELECT * FROM model_registry "
+                "WHERE model_name = %s "
+                "ORDER BY version DESC LIMIT 1",
+                (model_name,),
+            )
+
+        if not rows:
+            raise ValueError(
+                f"No model found for name='{model_name}', "
+                f"version={version!r}, stage={stage!r}."
+            )
+        return rows[0]

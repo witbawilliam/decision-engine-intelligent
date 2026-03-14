@@ -1,10 +1,50 @@
+
 from __future__ import annotations
+import re
+from datetime import datetime, timezone
+from typing import Annotated, Literal, Optional
 
-from typing import Optional, Literal
-from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import Field, StringConstraints
+from pydantic import BaseModel
+from typing import Literal, Optional, Any
 
-# Enums
+
+
+
+UUIDStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    ),
+]
+
+
+ModelVersionStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?$",
+        max_length=32,
+    ),
+]
+
+
+IdempotencyKeyStr = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        pattern=r"^[\x21-\x7E]{16,128}$",   # printable ASCII, no space/control chars
+    ),
+]
+
+# Progress percentage [0, 100].
+ProgressInt = Annotated[int, Field(ge=0, le=100)]
+
+# Normalised score / metric in [0.0, 1.0].
+NormalisedFloat = Annotated[float, Field(ge=0.0, le=1.0)]
+
+
 
 JobStatus = Literal[
     "uploaded",
@@ -19,67 +59,113 @@ JobStatus = Literal[
 ProblemType = Literal["regression", "classification", "forecasting"]
 
 
-# Job Creation Schema (Internal Use)
 
-class JobCreate(BaseModel):
-    """
-    Internal schema used when a new ML job is created.
-    """
+TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
-    user_id: str = Field(..., min_length=3)
-    filename: str
-    target_column: Optional[str] = None
-    problem_type: Optional[ProblemType] = None
-
-# Job Metadata Schema (Stored in PostgreSQL)
-
-class JobMetadata(BaseModel):
-    """
-    Represents full metadata stored for each ML job.
-    """
-
-    job_id: str
-    user_id: str
-    filename: str
-
-    status: JobStatus
-
-    problem_type: Optional[ProblemType] = None
-    target_column: Optional[str] = None
-
-    quality_score: Optional[float] = None
-    model_version: Optional[str] = None
-
-    error_message: Optional[str] = None
-
-    created_at: datetime
-    updated_at: datetime
+ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
+    "uploaded":  frozenset({"validated", "failed", "cancelled"}),
+    "validated": frozenset({"queued",    "failed", "cancelled"}),
+    "queued":    frozenset({"running",   "failed", "cancelled"}),
+    "running":   frozenset({"completed", "failed", "cancelled"}),
+    "completed": frozenset(),
+    "failed":    frozenset(),
+    "cancelled": frozenset(),
+}
 
 
-# Job Status Response (API)
 
-class JobStatusResponse(BaseModel):
-    """
-    API response when querying job status.
-    """
+_SAFE_FILENAME_RE = re.compile(r"^[\w\- ]+\.[a-zA-Z0-9]{1,10}$")
+_COLUMN_NAME_RE   = re.compile(r"^\w+$")
 
-    job_id: str
-    status: JobStatus
-    progress: int = Field(..., ge=0, le=100)
+class V1:
 
-    message: Optional[str] = None
+    class JobCreate(BaseModel):
+        user_id: UUIDStr
+        idempotency_key: IdempotencyKeyStr
+        filename: str
+        target_column: Optional[str] = None
+        problem_type: Optional[ProblemType] = None
+
+    class JobStatusResponse(BaseModel):
+        """Used for training updates"""
+        job_id: IdempotencyKeyStr
+        status: JobStatus
+        progress: ProgressInt
+        updated_at: datetime
+
+    class JobResultResponse(BaseModel):
+        """Used for inference/prediction results"""
+        job_id: IdempotencyKeyStr
+        status: Literal["completed"]
+        model_version: ModelVersionStr
+        performance: dict
+        insight_summary: Optional[str] = None
+
+    
+    class FeedbackRequest(BaseModel):
+        job_id: IdempotencyKeyStr
+        rating: int = Field(ge=1, le=5)
+        comment: Optional[str] = Field(None, max_length=500)
+
+    class FeedbackResponse(BaseModel):
+        status: str = "success"
+        message: str
+    
+
+    @staticmethod
+    def validate_filename(v: str) -> str:
+        
+        pass
+
+    class FeedbackRequest(BaseModel):
+        model_name: str
+        prediction: float
+        actual: float
+        metadata: Optional[dict[str, Any]] = None
+
+    class FeedbackResponse(BaseModel):
+        feedback_id: str
+        model_name: str
+        prediction: float
+        actual: float
+        absolute_error: float
+        squared_error: float
+        relative_error: Optional[float]
+        recorded_at: datetime
+        metadata: dict[str, Any]
+    
+    def validate_filename(v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("filename must not be empty.")
+        if not _SAFE_FILENAME_RE.match(v):
+            raise ValueError(
+                f"filename '{v}' contains disallowed characters. "
+                "Only alphanumerics, hyphens, underscores, spaces, and a "
+                "single dot-separated extension are permitted."
+            )
+        if len(v) > 255:
+            raise ValueError("filename must not exceed 255 characters.")
+        return v
 
 
-# Job Result Response
+    def validate_column_name(v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            raise ValueError("target_column must not be an empty string.")
+        if not _COLUMN_NAME_RE.match(v):
+            raise ValueError(
+                f"target_column '{v}' must contain only word characters (a-z, A-Z, 0-9, _)."
+            )
+        if len(v) > 128:
+            raise ValueError("target_column must not exceed 128 characters.")
+        return v
 
-class JobResultResponse(BaseModel):
-    """
-    Returned when job completes successfully.
-    """
 
-    job_id: str
-    status: Literal["completed"]
-
-    model_version: str
-    performance_metric: float
-    insight_summary: Optional[str] = None
+    def ensure_utc(v: datetime) -> datetime:
+        """Reject naïve datetimes; normalise tz-aware values to UTC."""
+        if v.tzinfo is None:
+            raise ValueError("Datetimes must be timezone-aware (UTC).")
+        return v.astimezone(timezone.utc)

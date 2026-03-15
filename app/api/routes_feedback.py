@@ -69,13 +69,13 @@ async def submit_feedback(
     recorded_at = datetime.now(tz=timezone.utc)
 
     try:
-        # 1. Compute Metrics
+        # Compute Metrics
         metrics = _compute_metrics(payload.prediction, payload.actual)
         
-        # 2. Map to V1 Response Schema
+        #  Map to V1 Response Schema
         response = _build_response(feedback_id, payload, metrics, recorded_at)
         
-        # 3. Structured Logging
+        #  Structured Logging
         logger.info(
             "Feedback recorded",
             extra={

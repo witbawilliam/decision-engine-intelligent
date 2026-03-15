@@ -26,7 +26,7 @@ async def upload_dataset(file: UploadFile = File(...)):
     """
     file_extension = Path(file.filename).suffix.lower()
     
-    # 1. Early Validation
+    #  Early Validation
     if file_extension not in ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -48,7 +48,7 @@ async def upload_dataset(file: UploadFile = File(...)):
     finally:
         file.file.close()
 
-    # 3. Metadata Extraction with Polars
+    #  Metadata Extraction with Polars
     try:
         if file_extension == ".csv":
             df = pl.read_csv(file_path)

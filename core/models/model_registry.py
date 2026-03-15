@@ -12,10 +12,7 @@ from storage.s3_client import S3Client
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# DDL – run once at startup (or via a migration tool).
-# Kept here so the registry is self-contained in development.
-# ---------------------------------------------------------------------------
+
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS model_registry (
     id            SERIAL       PRIMARY KEY,
@@ -72,9 +69,7 @@ class ModelRegistry:
         self._s3_prefix = s3_prefix.rstrip("/")
         self._ensure_table()
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    
 
     def register(
         self,
@@ -116,7 +111,7 @@ class ModelRegistry:
             extra={"bucket": self._s3.bucket_name, "key": artifact_key},
         )
 
-        # --- Persist metadata to Postgres ---
+        #  Persist metadata to Postgres 
         row = PostgresClient.execute(
             """
             INSERT INTO model_registry
@@ -254,9 +249,9 @@ class ModelRegistry:
             "s3": self._s3.ping(),
         }
 
-    # ------------------------------------------------------------------
+    
     # Internal helpers
-    # ------------------------------------------------------------------
+    
 
     def _ensure_table(self) -> None:
         """Create the ``model_registry`` table if it does not already exist."""

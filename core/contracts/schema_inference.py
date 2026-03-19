@@ -19,7 +19,7 @@ class SchemaInferenceResult:
 
 class SchemaInference:
     """
-    Enterprise-grade Semantic Inference Engine.
+     Semantic Inference Engine.
     Uses statistical heuristics and Shannon Entropy to determine data intent.
     """
 
@@ -33,7 +33,6 @@ class SchemaInference:
         if self.total_rows == 0:
             raise ValueError("Inference cannot run on an empty DataFrame.")
 
-        # Physical Type Mapping
         groups = self._group_by_physical_type()
         
         #  Semantic Refinement (The "Smart" Step)
@@ -115,7 +114,7 @@ class SchemaInference:
         unique_vals = self.df[main_target].n_unique()
         dtype = self.df[main_target].dtype
 
-        # Enterprise Logic: 
+        
         # Strings/Booleans are ALWAYS Classification.
         # Floats are ALWAYS Regression.
         # Integers with low cardinality are Classification.

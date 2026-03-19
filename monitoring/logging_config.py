@@ -26,10 +26,13 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from pythonjsonlogger.json import JsonFormatter
+
+formatter = JsonFormatter()
 
 
 try:
-    from pythonjsonlogger import jsonlogger  # type: ignore
+   
     _JSON_LOGGER_AVAILABLE = True
 except ImportError:
     _JSON_LOGGER_AVAILABLE = False
@@ -210,11 +213,11 @@ class _EnterpriseJSONFormatter(logging.Formatter):
 def _build_formatter() -> logging.Formatter:
     """Return the best available JSON formatter."""
     if _JSON_LOGGER_AVAILABLE:
-        fmt = jsonlogger.JsonFormatter(
-            fmt="%(timestamp)s %(level)s %(service)s %(trace_id)s %(message)s",
+        formatter = JsonFormatter(
+            "%(timestamp)s %(level)s %(name)s %(service)s %(trace_id)s %(message)s",
             rename_fields={"levelname": "level", "asctime": "timestamp"},
         )
-        return fmt
+        return formatter
     return _EnterpriseJSONFormatter()
 
 

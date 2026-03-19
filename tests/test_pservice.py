@@ -39,12 +39,6 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 1 — Add the service directory to sys.path
-# Adjust _SERVICE_DIR to match your layout:
-#   project/service/prediction_service.py  →  os.path.join(_HERE, "..", "service")
-#   project/outputs/prediction_service.py  →  os.path.join(_HERE, "..", "outputs")
-# ─────────────────────────────────────────────────────────────────────────────
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
 _SERVICE_DIR = os.path.normpath(os.path.join(_HERE, "..", "service"))
@@ -53,17 +47,6 @@ if _SERVICE_DIR not in sys.path:
     sys.path.insert(0, _SERVICE_DIR)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 2 — Stub every missing dependency BEFORE importing prediction_service
-#
-# KEY RULE: every level of a dotted import path needs its own sys.modules entry.
-#
-#   WRONG:   sys.modules['core'] = MagicMock()
-#            importing 'core.decision_engine.X' → 'core' is not a package
-#
-#   CORRECT: register 'core', 'core.decision_engine', 'core.decision_engine.X'
-#            as separate entries.
-# ─────────────────────────────────────────────────────────────────────────────
 
 _STUBS = [
     "core",
@@ -99,9 +82,6 @@ from service.prediction_service import (           # noqa: E402
 import pytest   # noqa: E402
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _make_lock_cm() -> MagicMock:
     cm = MagicMock()
@@ -110,9 +90,6 @@ def _make_lock_cm() -> MagicMock:
     return cm
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Fixtures
-# ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture
 def mock_redis():
@@ -158,9 +135,6 @@ def sample_request():
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 1 — Cache hit skips the pipeline
-# ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_predict_cache_hit(service, mock_redis, sample_request):
@@ -177,9 +151,7 @@ async def test_predict_cache_hit(service, mock_redis, sample_request):
     service._temporal.predict.assert_not_called()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 2 — Cache miss triggers pipeline + cache write + audit
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_predict_cache_miss_pipeline_success(
@@ -196,9 +168,7 @@ async def test_predict_cache_miss_pipeline_success(
     mock_pg.insert.assert_called_once()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 3 — Redis GET failure is non-fatal
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.mark.asyncio
 async def test_resilience_redis_get_failure_handled(service, mock_redis):
@@ -222,9 +192,6 @@ async def test_resilience_redis_get_failure_handled(service, mock_redis):
     assert response.cached     is False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 4 — Pipeline timeout raises TimeoutError
-# ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_pipeline_timeout_handling(service, sample_request):
@@ -234,9 +201,6 @@ async def test_pipeline_timeout_handling(service, sample_request):
             await service.predict(sample_request)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 5 — Sensitivity analysis happy path
-# ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_sensitivity_analysis_happy_path(service):
@@ -276,9 +240,6 @@ async def test_sensitivity_analysis_happy_path(service):
     MockAnalyzer.return_value.analyze.assert_called_once()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Test 6 — Health check reports correct per-backend state
-# ─────────────────────────────────────────────────────────────────────────────
 
 def test_health_check_logic(service, mock_redis, mock_pg):
     """Each backend is reported independently."""

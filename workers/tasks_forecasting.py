@@ -6,12 +6,11 @@ from typing import Any
 import os
 
 import polars as pl
-from celery import Task
+from celery import Task, shared_task
 from celery.exceptions import MaxRetriesExceededError
 
 from core.pipelines.temporal_pipeline import TemporalPipeline
 from monitoring.metrics import track_training_latency
-from workers.celery_app import celery_app
 from datetime import datetime, timezone
 from app.schemas.job_schema import V1
 
@@ -164,7 +163,7 @@ class _ProgressReporter:
         )
 
 
-@celery_app.task(
+@shared_task(
     bind=True,
     base=ForecastingTask,
     name="workers.tasks.train_forecasting_task",

@@ -7,13 +7,12 @@ from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
 import polars as pl
-from celery import Task
+from celery import Task, shared_task
 from celery.exceptions import MaxRetriesExceededError
 
 from core.pipelines.tabular_pipeline import TabularPipeline, PipelineResult
 from core.pipelines.temporal_pipeline import TemporalPipeline, TemporalPipelineConfig
 from monitoring.logging_config import get_logger, RequestContext
-from workers.celery_app import celery_app
 from app.schemas.job_schema import V1
 
 
@@ -199,7 +198,7 @@ class TrainingTask(Task):
 
 
 
-@celery_app.task(
+@shared_task(
     bind=True,
     base=TrainingTask,
     name="workers.tasks.train_tabular_task",
@@ -215,7 +214,6 @@ class TrainingTask(Task):
     retry_jitter=True,        
 )
 
-@celery_app.task(bind=True, base=TrainingTask, name="workers.tasks.train_tabular_task")
 def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResult:
     task_id = self.request.id
     progress = TaskProgressReporter(task=self, task_id=task_id)
@@ -246,7 +244,7 @@ def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResul
             return _build_error_result(task_id, str(e))
         
 
-@celery_app.task(
+@shared_task(
     bind=True,
     base=TrainingTask,
     name="workers.tasks.train_temporal_task",

@@ -1,92 +1,107 @@
-import polars as pl
-from pathlib import Path
-from fastapi import APIRouter, HTTPException, BackgroundTasks, status
+import logging
+from fastapi import APIRouter, HTTPException, status
 from datetime import datetime, timezone
-from typing import Literal
 
-from core.pipelines.tabular_pipeline import TabularPipeline
-from core.pipelines.temporal_pipeline import TemporalPipeline
 from app.schemas.job_schema import V1
+from workers.celery_app import celery_app
+
 
 router = APIRouter(prefix="/v1/train", tags=["Model Training"])
+logger = logging.getLogger(__name__)
 
 
 
-def load_data(filename: str) -> pl.DataFrame:
+def _validate_job_create(request: V1.JobCreate) -> None:
     """
-    Standardized data ingestion engine. 
-    Supports CSV and Excel using high-performance Rust engines.
-    """
-    path = Path(filename)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {filename}")
-        
-    extension = path.suffix.lower()
-
-    try:
-        if extension == ".csv":
-            return pl.read_csv(filename)
-        
-        elif extension in [".xlsx", ".xls", ".xlsm"]:
-            
-            return pl.read_excel(filename, engine="fastexcel")
-        
-        else:
-            raise ValueError(f"Unsupported extension '{extension}'. Use .csv or .xlsx")
-    except Exception as e:
-        # In a real app, log this to Sentry or CloudWatch
-        raise RuntimeError(f"Failed to parse {extension} file: {str(e)}")
-
-# --- Background Worker ---
-
-def run_training_task(job_params: V1.JobCreate, pipeline_type: Literal["tabular", "forecast"]):
-    """
-    Executes the heavy lifting. Decoupled from FastAPI for easy migration
-    to Celery or Ray in the future.
+    Run the V1 field validators that are plain methods (not Pydantic @validators).
+    Raises HTTPException(422) on any violation.
     """
     try:
-        
-        df = load_data(job_params.filename)
+        V1.validate_filename(request.filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
-        
-        if pipeline_type == "tabular":
-            pipeline = TabularPipeline(df=df, target_column=job_params.target_column)
-        else:
-            pipeline = TemporalPipeline(
-                df=df, 
-                target_column=job_params.target_column,
-                time_column="ds", 
-                model_type="prophet"
-            )
-
-        
-        result = pipeline.run()
-        print(f"Job {job_params.idempotency_key} Success: {result}")
-
-    except Exception as e:
-        print(f"Job {job_params.idempotency_key} Failed: {str(e)}")
+    try:
+        V1.validate_column_name(request.target_column)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
 
+def _dispatch(task_type: str, request: V1.JobCreate) -> V1.JobStatusResponse:
+    """
+    Shared dispatch helper.  Returns a JobStatusResponse on success.
+    job_id is set to the request's idempotency_key so callers can poll by the
+    same key they submitted (the Celery task UUID is an internal detail).
+    """
+    try:
+        celery_app.dispatch_automl_task(task_type, request.model_dump())
+    except ValueError as exc:
+        # Unknown task_type — should not happen in normal flow, but guard anyway
+        logger.error("Unknown task type '%s': %s", task_type, exc)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        logger.error("Failed to dispatch '%s' task: %s", task_type, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error dispatching job",
+        )
 
-@router.post("/tabular", status_code=status.HTTP_202_ACCEPTED, response_model=V1.JobStatusResponse)
-async def train_tabular(request: V1.JobCreate, background_tasks: BackgroundTasks):
-    background_tasks.add_task(run_training_task, request, "tabular")
     return V1.JobStatusResponse(
-        job_id=request.idempotency_key,
+        job_id=request.idempotency_key,   # stable, client-visible correlation ID
         status="queued",
         progress=0,
-        updated_at=datetime.now(timezone.utc)
+        updated_at=datetime.now(timezone.utc),
     )
 
-@router.post("/forecast", status_code=status.HTTP_202_ACCEPTED, response_model=V1.JobStatusResponse)
-async def train_forecast(request: V1.JobCreate, background_tasks: BackgroundTasks):
+
+@router.post(
+    "/validate",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=V1.JobStatusResponse,
+)
+async def validate_dataset(request: V1.JobCreate):
+    """
+    Dispatches a dataset-validation job to workers.tasks_validation.task_validation.
+    Maps to the 'validate' key in celery_app.dispatch_automl_task.
+    """
+    _validate_job_create(request)
+    return _dispatch("validate", request)
+
+
+@router.post(
+    "/tabular",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=V1.JobStatusResponse,
+)
+async def train_tabular(request: V1.JobCreate):
+    """
+    Dispatches a tabular training job to workers.tasks_training.task_training.
+    Rejects requests where problem_type is explicitly set to 'forecasting'
+    (those belong on /forecast).
+    """
+    if request.problem_type == "forecasting":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Forecasting jobs must be submitted to /v1/train/forecast",
+        )
+    _validate_job_create(request)
+    return _dispatch("train", request)
+
+
+@router.post(
+    "/forecast",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=V1.JobStatusResponse,
+)
+async def train_forecast(request: V1.JobCreate):
+    """
+    Dispatches a forecasting training job to workers.tasks_forecasting.task_forecasting.
+    Requires problem_type == 'forecasting'.
+    """
     if request.problem_type != "forecasting":
-        raise HTTPException(status_code=400, detail="Problem type must be 'forecasting'")
-
-    background_tasks.add_task(run_training_task, request, "forecast")
-    return V1.JobStatusResponse(
-        job_id=request.idempotency_key,
-        status="queued",
-        progress=0,
-        updated_at=datetime.now(timezone.utc)
-    )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="problem_type must be 'forecasting' for this endpoint",
+        )
+    _validate_job_create(request)
+    return _dispatch("forecast", request)

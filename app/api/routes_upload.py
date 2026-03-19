@@ -1,80 +1,235 @@
-import os
-import shutil
-import polars as pl
-from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException, status
-from typing import Dict, Any
 
-from app.schemas.job_schema import V1 
+
+from __future__ import annotations
+
+import logging
+import shutil
+import uuid
+from pathlib import Path
+from typing import Annotated
+from typing import List
+
+import polars as pl
+from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+
+
+from app.schemas.upload_schema import UploadRequest, UploadResponse
+
+
+from storage.s3_client import S3Client
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/datasets", tags=["Dataset Management"])
 
-UPLOAD_FOLDER = Path("datasets")
-UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
-ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm", ".parquet"}
+TEMP_DIR = Path("tmp/uploads")
+TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-def get_safe_path(filename: str) -> Path:
-    """Prevents path traversal attacks by extracting only the filename."""
-    safe_name = Path(filename).name 
-    return UPLOAD_FOLDER / safe_name
 
-@router.post("/upload", status_code=status.HTTP_201_CREATED)
-async def upload_dataset(file: UploadFile = File(...)):
+ALLOWED_EXTENSIONS = {".csv", ".parquet", ".xlsx", ".xls", ".xlsm"}
+
+
+CONTENT_TYPE_MAP = {
+    ".csv":     "text/csv",
+    ".parquet": "application/octet-stream",
+    ".xlsx":    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls":     "application/vnd.ms-excel",
+    ".xlsm":    "application/vnd.ms-excel.sheet.macroenabled.12",
+}
+
+
+
+def get_s3_client() -> S3Client:
     """
-    Enterprise-grade file upload with streaming, security, and metadata extraction.
+    Provides an S3Client instance pointed at the datasets bucket.
+    Reads credentials + bucket name from environment variables via config.
+    Replace with a mock in tests.
     """
-    file_extension = Path(file.filename).suffix.lower()
+    import os
+    return S3Client(
+        bucket_name  = os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
+        endpoint_url = os.getenv("S3_ENDPOINT_URL"),       # None in production (uses AWS)
+        access_key   = os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_key   = os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region       = os.getenv("AWS_REGION", "us-east-1"),
+    )
+
+
+def _safe_filename(filename: str) -> str:
+    """
+    Strip any directory components to prevent path traversal attacks.
+    'uploads/../etc/passwd' → 'passwd'
+    """
+    return Path(filename).name
+
+
+@router.post(
+    "/upload",
+    response_model=UploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload dataset(s)",
+)
+async def upload_dataset(
+    files: List[UploadFile] = File(...),
+
+    user_id: str = Form(...),
+    file_types: List[str] = Form(...),
+    file_sizes_mb: List[float] = Form(...),
+
+    target_column: str | None = Form(default=None),
+    problem_type: str | None = Form(default=None),
+
+    # Merge config (optional)
+    left_on: str | None = Form(default=None),
+    right_on: str | None = Form(default=None),
+    merge_how: str | None = Form(default=None),
+
+    s3: S3Client = Depends(get_s3_client),
+):
+    """
+    Supports:
+    - Single file upload
+    - Two-file merge workflow
+    """
+
     
-    #  Early Validation
-    if file_extension not in ALLOWED_EXTENSIONS:
+    if not (len(files) == len(file_types) == len(file_sizes_mb)):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type. Allowed: {ALLOWED_EXTENSIONS}"
+            status_code=400,
+            detail="files, file_types, and file_sizes_mb must have same length",
         )
 
-    file_path = get_safe_path(file.filename)
-
-    
-    try:
-        with file_path.open("wb") as buffer:
-            # Iterates in chunks (default 1MB) so we don't load 2GB into RAM
-            shutil.copyfileobj(file.file, buffer)
-    except Exception as e:
+    if len(files) > 4:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Disk I/O failure: {str(e)}"
+            status_code=400,
+            detail="Maximum of 4 files allowed",
         )
-    finally:
-        file.file.close()
 
-    #  Metadata Extraction with Polars
-    try:
-        if file_extension == ".csv":
-            df = pl.read_csv(file_path)
-        elif file_extension == ".parquet":
-            df = pl.read_parquet(file_path)
-        else:
-            # Excel support
-            df = pl.read_excel(file_path, engine="fastexcel")
+   
+    file_metas = []
 
-        return {
-            "filename": file_path.name,
-            "storage_path": str(file_path),
-            "size_bytes": file_path.stat().st_size,
-            "shape": {
-                "rows": df.height,
-                "columns": df.width
-            },
-            "schema": {name: str(dtype) for name, dtype in df.schema.items()},
-            "created_at": str(pl.datetime.now())
+    for i, file in enumerate(files):
+        safe_name = _safe_filename(file.filename)
+        extension = Path(safe_name).suffix.lower()
+
+        if extension not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type '{extension}'",
+            )
+
+        file_metas.append({
+            "filename": safe_name,
+            "file_type": file_types[i],
+            "file_size_mb": file_sizes_mb[i],
+        })
+
+   
+    merge_config = None
+
+    if len(files) == 4:
+        if not left_on or not right_on:
+            raise HTTPException(
+                status_code=422,
+                detail="Merge requires left_on and right_on",
+            )
+
+        merge_config = {
+            "left_on": left_on,
+            "right_on": right_on,
+            "how": merge_how or "inner",
         }
-        
-    except Exception as e:
-        # If the file is corrupted or unreadable, delete the garbage file
-        if file_path.exists():
-            file_path.unlink()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"File uploaded but could not be parsed: {str(e)}"
+
+    
+    try:
+        upload_meta = UploadRequest(
+            files=file_metas,
+            user_id=user_id,
+            target_column=target_column,
+            problem_type=problem_type,
+            merge_config=merge_config,
         )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    
+    temp_paths = []
+    s3_keys = []
+
+    try:
+        for i, file in enumerate(files):
+            safe_name = upload_meta.files[i].filename
+            s3_key = f"datasets/{user_id}/{uuid.uuid4().hex}_{safe_name}"
+
+            temp_path = TEMP_DIR / f"{uuid.uuid4().hex}_{safe_name}"
+
+            with temp_path.open("wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+            temp_paths.append(temp_path)
+            s3_keys.append(s3_key)
+
+        
+        dataframes = []
+
+        for path in temp_paths:
+            ext = path.suffix
+
+            if ext == ".csv":
+                df = pl.read_csv(path)
+            elif ext == ".parquet":
+                df = pl.read_parquet(path)
+            else:
+                df = pl.read_excel(path, engine="fastexcel")
+
+            dataframes.append(df)
+
+        
+        if len(dataframes) == 2:
+            df = dataframes[0].join(
+                dataframes[1],
+                left_on=upload_meta.merge_config.left_on,
+                right_on=upload_meta.merge_config.right_on,
+                how=upload_meta.merge_config.how,
+            )
+            merged = True
+        else:
+            df = dataframes[0]
+            merged = False
+
+        dataset_shape = {"rows": df.height, "columns": df.width}
+
+        
+        final_key = f"datasets/{user_id}/{uuid.uuid4().hex}_final.parquet"
+
+        df.write_parquet(temp_paths[0])  # reuse first path
+
+        s3.upload_file(
+            local_path=temp_paths[0],
+            object_name=final_key,
+            metadata={
+                "user_id": user_id,
+                "rows": str(dataset_shape["rows"]),
+                "columns": str(dataset_shape["columns"]),
+                "merged": str(merged),
+            },
+            content_type="application/octet-stream",
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    finally:
+        for path in temp_paths:
+            path.unlink(missing_ok=True)
+
+    
+    return UploadResponse(
+        job_id=final_key,
+        status="uploaded",
+        message=f"Dataset processed successfully ({'merged' if merged else 'single file'})",
+        file_count=len(files),
+        merged=merged,
+    )

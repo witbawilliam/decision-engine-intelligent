@@ -60,27 +60,27 @@ class FeatureProcessor:
         if df.height == 0:
             raise ValueError("Inference failed: DataFrame contains zero records.")
 
-        # 1. Deduplication (Eager - changes row count)
+        #  Deduplication (Eager - changes row count)
         df, removed_count = self._remove_duplicates(df)
 
-        # 2. Type Discovery
+        #  Type Discovery
         schema = df.schema
         numeric_cols = [c for c, t in schema.items() if t.is_numeric() and c != self.target_column]
         cat_cols = [c for c, t in schema.items() if (t.is_temporal() or t == pl.Utf8 or t == pl.Categorical) and c != self.target_column]
 
-        # 3. Leakage & Variance Detection
+        #  Leakage & Variance Detection
         leaked = self._detect_leakage(df, numeric_cols)
         low_variance = self._detect_low_variance(df, numeric_cols + cat_cols)
         to_drop = list(set(leaked + low_variance))
 
-        # 4. Final Pipeline Construction (Lazy)
+        # Final Pipeline Construction (Lazy)
         df_lazy = df.lazy().drop(to_drop)
         
         # Apply vectorised imputation and encoding in a single graph
         df_lazy = self._apply_imputation(df_lazy, numeric_cols, cat_cols, to_drop)
         df_lazy = self._apply_encoding(df_lazy, cat_cols, to_drop)
 
-        # 5. Imbalance Check
+        #  Imbalance Check
         is_imbalanced = self._check_imbalance(df)
 
         return df_lazy.collect(), PreprocessingMetadata(

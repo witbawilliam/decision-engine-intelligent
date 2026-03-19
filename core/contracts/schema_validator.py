@@ -26,7 +26,7 @@ class SchemaValidationResult:
 
 class ColumnContract(BaseModel):
     name: str
-    dtype: Any  # Can be expanded to specific Polars types
+    dtype: Any  
     nullable: bool = False
     unique: bool = False
 
@@ -73,7 +73,6 @@ class VarianceRule:
 
 class TemporalRule:
     def verify(self, df: pl.DataFrame, _, p_type: ProblemType) -> Optional[str]:
-        """Ensures a time axis exists for forecasting."""
         if p_type == ProblemType.FORECASTING:
             has_date = any(t in (pl.Date, pl.Datetime) for t in df.dtypes)
             if not has_date:
@@ -84,7 +83,7 @@ class TemporalRule:
 
 class SchemaValidator:
     """
-    Enterprise-grade validator that evaluates a DataFrame against a DatasetSchema.
+     validator that evaluates a DataFrame against a DatasetSchema.
     """
 
     def __init__(self, df: pl.DataFrame, schema: DatasetSchema, problem_type: ProblemType):

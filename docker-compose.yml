@@ -1,4 +1,5 @@
 services:
+
   db:
     image: postgres:15-alpine
     environment:
@@ -16,6 +17,23 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
+      timeout: 5s
+      retries: 5
+
+  s3:
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - DEFAULT_REGION=us-east-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - "./init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh"  
 
   api:
     build:
@@ -26,13 +44,48 @@ services:
     volumes:
       - .:/app
     environment:
-      - DATABASE_URL=postgresql://admin:password@db:5432/automl_db
-      - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
+
+      # ── Postgres (pydantic-settings nested delimiter) ──────────────────────
+      - POSTGRES__URL=postgresql://admin:password@db:5432/automl_db
+      - POSTGRES__POOL_SIZE=20
+      - POSTGRES__POOL_PRE_PING=true
+
+      # ── Redis ──────────────────────────────────────────────────────────────
+      - REDIS__URL=redis://redis:6379/0
+      - REDIS__MAX_CONNECTIONS=10
+
+      - S3__ENDPOINT_URL=http://s3:4566
+      - S3__BUCKET_NAME=ml-datasets
+      - S3_DATASETS_BUCKET=ml-datasets  # Added this to match your Python code
+      
+      - AWS_ACCESS_KEY_ID=testkey1
+      - AWS_SECRET_ACCESS_KEY=testkey2
+      - AWS_REGION=us-east-1           # Standardized for os.getenv
+      
+      - S3__ACCESS_KEY=testkey1
+      - S3__SECRET_KEY=testkey2
+      - S3__REGION=us-east-1
+
+
+      # ── Celery ────────────────────────────────────────────────────────────
+      - CELERY__BROKER_URL=redis://redis:6379/0
+      - CELERY__RESULT_BACKEND=redis://redis:6379/0
+      - CELERY__TASK_SERIALIZER=json
+      - CELERY__WORKER_CONCURRENCY=4
+
+      # ── App ───────────────────────────────────────────────────────────────
+      - APP_NAME=ML-Intelligence-Platform
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+      - ENABLE_TRACING=false
+
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      s3:
         condition: service_healthy
 
   worker:
@@ -45,9 +98,48 @@ services:
     volumes:
       - .:/app
     environment:
-      - DATABASE_URL=postgresql://admin:password@db:5432/automl_db
-      - REDIS_URL=redis://redis:6379/0
       - PYTHONUNBUFFERED=1
+
+      # ── Postgres ──────────────────────────────────────────────────────────
+      - POSTGRES__URL=postgresql://admin:password@db:5432/automl_db
+      - POSTGRES__POOL_SIZE=20
+      - POSTGRES__POOL_PRE_PING=true
+
+      # ── Redis ─────────────────────────────────────────────────────────────
+      - REDIS__URL=redis://redis:6379/0
+      - REDIS__MAX_CONNECTIONS=10
+
+      # ── S3 / LocalStack ───────────────────────────────────────────────────
+      - S3__ENDPOINT_URL=http://s3:4566
+      - S3__BUCKET_NAME=ml-datasets
+      - S3_DATASETS_BUCKET=ml-datasets  # Added this to match your Python code
+      
+      - AWS_ACCESS_KEY_ID=testkey1
+      - AWS_SECRET_ACCESS_KEY=testkey2
+      - AWS_REGION=us-east-1           # Standardized for os.getenv
+      
+      - S3__ACCESS_KEY=testkey1
+      - S3__SECRET_KEY=testkey2
+      - S3__REGION=us-east-1
+
+      # ── Celery ────────────────────────────────────────────────────────────
+      - CELERY__BROKER_URL=redis://redis:6379/0
+      - CELERY__RESULT_BACKEND=redis://redis:6379/0
+      - CELERY__TASK_SERIALIZER=json
+      - CELERY__WORKER_CONCURRENCY=4
+
+      # ── App ───────────────────────────────────────────────────────────────
+      - APP_NAME=ML-Intelligence-Platform
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+      - ENABLE_TRACING=false
+
     depends_on:
       redis:
         condition: service_healthy
+      db:
+        condition: service_healthy
+      s3:
+        condition: service_healthy
+
+

@@ -1,6 +1,7 @@
 
 
 from __future__ import annotations
+import os
 
 import logging
 import shutil
@@ -18,10 +19,13 @@ from app.schemas.upload_schema import UploadRequest, UploadResponse
 
 
 from storage.s3_client import S3Client
+from app.config import get_settings
+
+settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/v1/datasets", tags=["Dataset Management"])
+router = APIRouter(prefix="/datasets", tags=["Dataset Management"])
 
 
 TEMP_DIR = Path("tmp/uploads")
@@ -47,12 +51,18 @@ def get_s3_client() -> S3Client:
     Reads credentials + bucket name from environment variables via config.
     Replace with a mock in tests.
     """
-    import os
+
+    access_key = os.getenv("AWS_ACCESS_KEY_ID")
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+
+    if not access_key or not secret_key:
+        raise ValueError("Missing AWS credentials")
+    
     return S3Client(
         bucket_name  = os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
-        endpoint_url = os.getenv("S3_ENDPOINT_URL"),       # None in production (uses AWS)
-        access_key   = os.getenv("AWS_ACCESS_KEY_ID"),
-        secret_key   = os.getenv("AWS_SECRET_ACCESS_KEY"),
+        endpoint_url = settings.s3.endpoint_url or None,      
+        access_key=access_key,
+        secret_key=secret_key,
         region       = os.getenv("AWS_REGION", "us-east-1"),
     )
 
@@ -90,8 +100,8 @@ async def upload_dataset(
 ):
     """
     Supports:
-    - Single file upload
-    - Two-file merge workflow
+      Single file upload
+      Two-file merge workflow
     """
 
     

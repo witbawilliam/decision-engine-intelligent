@@ -243,7 +243,7 @@ class PredictionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _set_cache_key(self) -> "PredictionRequest":
-        """Compute cache_key once after all fields are validated."""
+
         self.cache_key = compute_cache_key(self.model_name, self.version, self.features)
         return self
 

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
  
 import numpy as np
 import polars as pl
+from celery import Task, shared_task
  
 from core.contracts.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerTriggered
 from core.drift.drift_detector import DriftDetector, DriftReport
@@ -410,9 +411,6 @@ class TaskValidator:
         """
         Write the validation outcome to PostgreSQL for audit and monitoring.
  
-        Two writes:
-          1. ``task_validations``  — top-level pass/fail record.
-          2. ``drift_reports``     — per-feature KS p-values (if available).
         """
         record_id = str(uuid.uuid4())
  
@@ -471,10 +469,14 @@ class TaskValidator:
 
  
 class ValidationError(Exception):
-    """Raised when a validation gate fails due to bad input (not a system fault)."""
+
     pass
  
- 
+@shared_task(
+    bind=True, 
+    name="workers.tasks_validation.task_validation",
+    queue="validation"
+)
 
 def validate_task(
     job_payload: Dict[str, Any],
@@ -487,25 +489,8 @@ def validate_task(
     elapsed_s: float,
     config: Optional[TaskValidationConfig] = None,
     **kwargs: Any,
-) -> ValidationResult:
-    """
-    Module-level convenience wrapper around ``TaskValidator.run``.
- 
-    Example
-    -------
-        from task_validation import validate_task
-        result = validate_task(
-         job_payload={"user_id": "...", "idempotency_key": "...", "filename": "data.csv"},
-         reference_df=ref,
-         current_df=curr,
-         model=xgb_clf,
-         feature_names=["age", "income", "score"],
-         quality_score=0.92,
-         model_metric=0.88,
-         elapsed_s=30.0,
-    ... )
-    assert result.passed
-    """
+  )-> ValidationResult:
+    
     return TaskValidator(config=config).run(
         job_payload=job_payload,
         reference_df=reference_df,

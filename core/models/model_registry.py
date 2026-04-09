@@ -35,18 +35,18 @@ class ModelRegistry:
     ML model registry backed by S3 (artifacts) and PostgreSQL (metadata).
 
     Artifact storage
-    ----------------
+    
     Model pickles are written to S3 under the key pattern::
 
         {s3_prefix}/{model_name}/v{version}/model.pkl
 
     Metadata storage
-    ----------------
+    
     Every registered version is a row in the ``model_registry`` table.
     The table is created automatically on first instantiation (idempotent).
 
     Parameters
-    ----------
+
     s3_client:   A configured :class:`S3Client` instance.
     s3_prefix:   Key prefix inside the bucket (default: ``"ml_registry"``).
     """
@@ -84,7 +84,6 @@ class ModelRegistry:
         Serialize *model*, upload it to S3, and record metadata in Postgres.
 
         Returns
-        -------
         The metadata dict for the new version (mirrors the DB row).
         """
         import json
@@ -92,8 +91,7 @@ class ModelRegistry:
         version = self._next_version(model_name)
         artifact_key = self._artifact_key(model_name, version)
         run_id = str(uuid.uuid4())
-
-        # --- Upload artifact to S3 ---
+        
         model_bytes = pickle.dumps(model)
         self._s3._client.put_object(
             Bucket=self._s3.bucket_name,

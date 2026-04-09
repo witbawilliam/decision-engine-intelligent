@@ -35,11 +35,9 @@ class SchemaInference:
 
         groups = self._group_by_physical_type()
         
-        #  Semantic Refinement (The "Smart" Step)
         # Identifies columns that are technically numbers but semantically categories
         refined = self._refine_semantics(groups)
         
-        #  ID Discovery
         ids = self._discover_ids(refined)
         
         #  Target & Problem Type Logic
@@ -78,7 +76,7 @@ class SchemaInference:
             unique_count = self.df[col].n_unique()
             cardinality_ratio = unique_count / self.total_rows
 
-            # Rule: Low cardinality numbers are semantically Categories
+            #  Low cardinality numbers are semantically Categories
             if unique_count <= 10 or (cardinality_ratio < 0.05 and unique_count < 100):
                 categorical.append(col)
             else:
@@ -114,17 +112,13 @@ class SchemaInference:
         unique_vals = self.df[main_target].n_unique()
         dtype = self.df[main_target].dtype
 
-        
-        # Strings/Booleans are ALWAYS Classification.
-        # Floats are ALWAYS Regression.
-        # Integers with low cardinality are Classification.
+    
         if dtype in (pl.Utf8, pl.Categorical, pl.Boolean):
             return ProblemType.CLASSIFICATION
         
         if dtype.is_float():
             return ProblemType.REGRESSION
 
-        # For Integers, use the threshold
         if unique_vals <= 20:
             return ProblemType.CLASSIFICATION
         

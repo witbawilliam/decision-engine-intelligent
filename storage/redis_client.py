@@ -11,6 +11,10 @@ from typing import Any, Generator, Optional
 import redis
 from redis.exceptions import LockError, RedisError
 
+from app.config import get_settings
+settings = get_settings()
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,20 +34,22 @@ class RedisClient:
         """
         Build a ``redis.Redis`` instance backed by a connection pool.
         """
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+       
+       
+        redis_url       = str(settings.redis.url)
+        max_connections = settings.redis.max_connections
 
         try:
             pool = redis.ConnectionPool.from_url(
                 redis_url,
-                max_connections=20,
+                max_connections=max_connections,
                 decode_responses=True,
                 socket_connect_timeout=2,
                 socket_timeout=5,
                 retry_on_timeout=True,
             )
             client = redis.Redis(connection_pool=pool)
-            # Eagerly verify the connection so errors surface at startup,
-            # not on the first real operation.
+            
             client.ping()
             logger.info("Redis connection pool initialised")
             return client

@@ -1,0 +1,1 @@
+{"timestamp": null, "level": null, "name": "ml_platform", "service": "ml-platform", "trace_id": "no-trace-id", "message": "platform_shutdown", "event": "shutdown_initiated", "service_version": "unknown", "environment": "development"}

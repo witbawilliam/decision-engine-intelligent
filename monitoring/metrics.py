@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from prometheus_client import Histogram
 
 import numpy as np
 from scipy import stats
@@ -28,7 +29,7 @@ from sklearn.metrics import (
 
 
 try:
-    from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, push_to_gateway
+    from prometheus_client import Counter, Gauge, Histogram, CollectorRegistry, Summary, push_to_gateway
     _PROMETHEUS_AVAILABLE = True
 except ImportError:
     _PROMETHEUS_AVAILABLE = False
@@ -46,6 +47,21 @@ except ImportError:
     _WANDB_AVAILABLE = False
 
 logger = logging.getLogger("ml_platform.metrics")
+
+
+
+TRAINING_LATENCY_HISTOGRAM = Histogram(
+    'training_latency_seconds',
+    'Time spent in training/inference pipelines',
+    labelnames=['pipeline', 'status']
+)
+
+# A Counter for total jobs
+TRAINING_JOB_COUNTER = Counter(
+    'training_jobs_total',
+    'Total number of jobs processed',
+    labelnames=['pipeline', 'status']
+)
 
 
 
@@ -102,41 +118,27 @@ class MetricsRegistry:
 
 
 
-def track_training_latency(task_id: str, status: str, pipeline: str):
-    """
-    Public API for Celery workers. 
-    This is what 'from monitoring.metrics import track_training_latency' looks for.
-    """
-    metric_name = f"{pipeline}_job_{status}"
-    
-    # Track in the Registry
-    MetricsRegistry.increment(
-        metric_name=metric_name,
-        tags={"task_id": task_id}
-    )
-    
-    # Structured logging for ELK/Grafana
-    logger.info(
-        "telemetry_recorded", 
-        extra={
-            "task_id": task_id, 
-            "status": status, 
-            "pipeline": pipeline,
-            "metric_name": metric_name
-        }
-    )
-
-
-
-def track_training_latency(task_id: str, status: str, pipeline: str):
+def track_training_latency(task_id: str, status: str, pipeline: str, duration: float = None):
     """Bridge for worker telemetry."""
-    # Ensure this doesn't crash if MetricsRegistry isn't fully initialized
     try:
+        # 1. Update your custom Registry (The dict-based one you have)
         metric_name = f"{pipeline}_job_{status}"
         MetricsRegistry.increment(metric_name, tags={"task_id": task_id})
+
+        # 2. Update Prometheus (This allows .observe() and .inc() to work)
+        if _PROMETHEUS_AVAILABLE:
+            TRAINING_JOB_COUNTER.labels(pipeline=pipeline, status=status).inc()
+            if duration is not None:
+                TRAINING_LATENCY_HISTOGRAM.labels(pipeline=pipeline, status=status).observe(duration)
+
     except Exception as e:
-        logger.error(f"Failed to increment registry: {e}")
+        logger.error(f"Failed to record telemetry: {e}")
     
+    # Structured Logging
     logger.info("telemetry_recorded", extra={
-        "task_id": task_id, "status": status, "pipeline": pipeline
+        "task_id": task_id, 
+        "status": status, 
+        "pipeline": pipeline, 
+        "duration": duration,
+        "metric_name": metric_name
     })

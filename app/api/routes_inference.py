@@ -1,3 +1,4 @@
+
 import time
 import logging
 from typing import Annotated
@@ -32,13 +33,8 @@ router = APIRouter(
 
 
 def get_prediction_service() -> PredictionService:
-    """
-    Provides a PredictionService instance.
-
-    Wire real pipeline / storage dependencies here.
-    Replace with mocks in tests by overriding this dependency.
-    """
-    return PredictionService()          # pipelines + storage injected in __init__
+    
+    return PredictionService()          
 
 
 
@@ -58,31 +54,10 @@ async def predict(
     request: PredictionRequest,
     service: Annotated[PredictionService, Depends(get_prediction_service)],
 ):
-    """
-    Single-item inference endpoint.
-
-    Connection map
     
-    prediction_schema.PredictionRequest
-         validated by FastAPI before this function body runs
-         .cache_key    - pre-computed SHA-256 (used by service._cache_get)
-         .trace          -TraceContext forwarded into service for structured logs
-         .pipeline_type - routed to tabular_pipeline or temporal_pipeline
-
-    prediction_service.PredictionService.predict()
-        checks RedisClient cache (cache hit → skips pipeline entirely)
-        dispatches to TemporalPipeline or TabularPipeline
-        runs decision_engine enrichment (counterfactuals, sensitivity)
-        writes audit record to PostgresClient
-        records latency via MetricsRegistry
-        returns internal PredictionResponse dataclass
-
-    This route then maps the service dataclass → schema PredictionResponse
-    so the response matches the declared response_model exactly.
-    """
     start_time = time.perf_counter()
 
-    # Log incoming metadata — never log raw feature values (PII risk)
+
     logger.info(
         "prediction_initiated",
         extra={
@@ -98,8 +73,8 @@ async def predict(
         features      = request.features,
         model_name    = request.model_name,
         request_id    = str(request.request_id),
-        trace_id      = request.trace.trace_id,   # propagate trace across service boundary
-        pipeline_type = request.pipeline_type.value,  # enum → "tabular" / "temporal"
+        trace_id      = request.trace.trace_id,   
+        pipeline_type = request.pipeline_type.value,  
     )
 
     try:
@@ -111,7 +86,7 @@ async def predict(
         
         return PredictionResponse(
             request_id    = request.request_id,
-            trace         = request.trace,                  # full TraceContext forwarded
+            trace         = request.trace,                  
             model_name    = svc_response.model_name,
             model_version = svc_response.model_version,
             status        = PredictionStatus.CACHED if svc_response.cached
@@ -175,7 +150,7 @@ async def predict(
         )
 
 
-# GET /inference/health 
+
 @router.get(
     "/health",
     summary="Service Health Check",

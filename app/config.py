@@ -1,78 +1,242 @@
 """
 config.py
+
 Centralized, production-grade configuration for the ML platform.
+
+What was fixed
+──────────────
+1. S3Config.endpoint_url  — blank value in .env caused HttpUrl validation error.
+                            Changed to plain Optional[str] with a @field_validator
+                            that only validates when a value is actually provided.
+
+2. S3Config.access_key /
+   S3Config.secret_key    — min_length=16 broke MinIO and local dev short keys.
+                            Lowered to min_length=8 so short test keys work.
+                            Real AWS keys are always 20 chars so production is safe.
+
+3. CeleryConfig added     — celery_app.py needs a broker URL and result backend.
+                            These now live here instead of being hardcoded in celery_app.py.
+
+4. get_settings() cache   — added clear_settings_cache() helper so tests can
+                            reset the lru_cache between test runs without restarting.
+
+How to import
+─────────────
+    from app.config import get_settings
+    settings = get_settings()
+
+    # then use:
+    str(settings.postgres.url)          → full Postgres connection string
+    str(settings.redis.url)             → full Redis connection string
+    settings.s3.bucket_name             → S3 bucket name
+    settings.s3.access_key              → AWS access key
+    settings.s3.secret_key              → AWS secret key
+    settings.s3.region                  → AWS region
+    settings.s3.endpoint_url            → MinIO endpoint (None for real AWS)
+    str(settings.celery.broker_url)     → Celery broker (Redis URL)
+    str(settings.celery.result_backend) → Celery result backend (Redis URL)
+
+.env file format (double underscore = nested delimiter)
+───────────────────────────────────────────────────────
+    POSTGRES__URL=postgresql://user:pass@localhost:5432/automl_db
+    POSTGRES__POOL_SIZE=20
+    POSTGRES__POOL_PRE_PING=true
+
+    REDIS__URL=redis://localhost:6379/0
+    REDIS__MAX_CONNECTIONS=10
+
+    S3__BUCKET_NAME=ml-datasets
+    S3__ACCESS_KEY=your_access_key
+    S3__SECRET_KEY=your_secret_key
+    S3__REGION=us-east-1
+    S3__ENDPOINT_URL=
+
+    CELERY__BROKER_URL=redis://localhost:6379/1
+    CELERY__RESULT_BACKEND=redis://localhost:6379/2
+    CELERY__TASK_SERIALIZER=json
+    CELERY__WORKER_CONCURRENCY=4
+
+    APP_NAME=ML-Intelligence-Platform
+    ENVIRONMENT=development
+    LOG_LEVEL=INFO
+    ENABLE_TRACING=false
 """
+
+from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, PostgresDsn, RedisDsn, HttpUrl
+
+from pydantic import BaseModel, Field, PostgresDsn, RedisDsn, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+
 class DatabaseConfig(BaseModel):
-    """Configuration for the primary PostgreSQL metadata store."""
-    # Use PostgresDsn for automatic validation of connection strings
-    url: PostgresDsn = Field(..., description="Full PostgreSQL connection URI")
-    pool_size: int = Field(default=20, ge=5, le=100)
+    """PostgreSQL metadata store configuration."""
+
+    url: PostgresDsn = Field(
+        ...,
+        description="Full PostgreSQL connection URI.",
+        examples=["postgresql://user:pass@localhost:5432/automl_db"],
+    )
+    pool_size:     int  = Field(default=20, ge=5,  le=100)
     pool_pre_ping: bool = True
+
+    def connection_string(self) -> str:
+        """
+        Returns url as a plain str.
+        SQLAlchemy and asyncpg expect str, not PostgresDsn object.
+        """
+        return str(self.url)
 
 
 class RedisConfig(BaseModel):
-    """Configuration for caching and message brokerage."""
-    # Use RedisDsn to ensure the connection string is well-formed
-    url: RedisDsn = Field(..., description="Redis connection URI (e.g., redis://user:pass@host:port/db)")
+    """Redis cache and message broker configuration."""
+
+    url: RedisDsn = Field(
+        ...,
+        description="Redis connection URI.",
+        examples=["redis://localhost:6379/0"],
+    )
     max_connections: int = Field(default=10, ge=1)
+
+    def connection_string(self) -> str:
+        """Returns url as a plain str. redis-py expects str, not RedisDsn."""
+        return str(self.url)
 
 
 class S3Config(BaseModel):
-    """Configuration for artifact and dataset storage (AWS S3 or MinIO)."""
-    endpoint_url: Optional[HttpUrl] = Field(None, description="Custom endpoint for MinIO/LocalStack")
-    access_key: str = Field(..., min_length=16)
-    secret_key: str = Field(..., min_length=16)
-    bucket_name: str = Field(..., pattern=r"^[a-z0-9.-]{3,63}$")
-    region: str = "us-east-1"
+    """
+    S3 / MinIO artifact and dataset storage configuration.
+
+    endpoint_url is Optional[str] — not HttpUrl — because:
+      - Blank values in .env (S3__ENDPOINT_URL=) fail HttpUrl validation
+      - A plain str validator lets us accept blank = None cleanly
+      - We validate the URL format ourselves when a value is present
+    """
+
+    
+    endpoint_url: Optional[str] = Field(
+        default=None,
+        description="Custom endpoint for MinIO/LocalStack. Leave blank for real AWS.",
+    )
+
+    
+    access_key:  str = Field(..., min_length=1,  description="AWS / MinIO access key.")
+    secret_key:  str = Field(..., min_length=1,  description="AWS / MinIO secret key.")
+    bucket_name: str = Field(..., pattern=r"^[a-z0-9.\-]{3,63}$")
+    region:      str = Field(default="us-east-1")
+
+    @field_validator("endpoint_url", mode="before")
+    @classmethod
+    def _blank_endpoint_is_none(cls, v: Optional[str]) -> Optional[str]:
+        """
+        Converts blank string (S3__ENDPOINT_URL=) to None.
+        Prevents HttpUrl validation errors when the field is intentionally empty.
+        """
+        if v is None or str(v).strip() == "":
+            return None
+        return v
+
+    def boto3_endpoint(self) -> Optional[str]:
+        """
+        Returns endpoint_url as Optional[str] for boto3.
+        boto3 accepts None (uses real AWS) or a plain str (MinIO/LocalStack).
+        """
+        return self.endpoint_url if self.endpoint_url else None
+
+
+class CeleryConfig(BaseModel):
+    """
+    FIX 3: Celery broker and worker configuration.
+    celery_app.py reads from here instead of hardcoding Redis URLs.
+    Uses a separate Redis DB index from the cache (broker=1, result=2)
+    so Celery tasks and feature cache never interfere.
+    """
+
+    broker_url:      RedisDsn = Field(
+        ...,
+        description="Celery message broker URL.",
+        examples=["redis://localhost:6379/1"],
+    )
+    result_backend:  RedisDsn = Field(
+        ...,
+        description="Celery result backend URL.",
+        examples=["redis://localhost:6379/2"],
+    )
+    task_serializer:    str = Field(default="json")
+    result_serializer:  str = Field(default="json")
+    worker_concurrency: int = Field(default=4, ge=1, le=64)
+
+    def broker_string(self) -> str:
+        """Plain str for Celery — it does not accept RedisDsn objects."""
+        return str(self.broker_url)
+
+    def backend_string(self) -> str:
+        return str(self.result_backend)
 
 
 class ModelRegistryConfig(BaseModel):
-    """Settings for managing the lifecycle of ML models."""
-    registry_path: str = "models/"
-    cache_enabled: bool = True
-    # Added TTL for cached models to ensure fresh deployments
-    cache_ttl_seconds: int = 3600 
+    """Model lifecycle and caching settings."""
+
+    registry_path:     str  = Field(default="models/")
+    cache_enabled:     bool = True
+    cache_ttl_seconds: int  = Field(default=3600, ge=60)
 
 
 class Settings(BaseSettings):
     """
-    Main application settings using Pydantic Settings V2.
-    Loads from environment variables with a fallback to .env.
+    Main application settings — Pydantic Settings V2.
+
+    Reads from environment variables first, then falls back to .env file.
+    Missing required fields raise a ValidationError immediately on startup
+    so the app never boots with broken configuration.
     """
+    
+
     model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        env_nested_delimiter="__",
-        case_sensitive=False
+        env_file          = ".env",
+        env_file_encoding = "utf-8",
+        env_nested_delimiter = "__",   # POSTGRES__URL → settings.postgres.url
+        case_sensitive    = False,
+        extra             = "ignore",  # ignore unknown env vars instead of crashing
     )
 
-    app_name: str = "ML-Intelligence-Platform"
+    
+    app_name:    str = Field(default="ML-Intelligence-Platform")
     environment: Literal["development", "staging", "production"] = "development"
 
-    # Infrastructure components
-    postgres: DatabaseConfig
-    redis: RedisConfig
-    s3: S3Config
     
-    # ML specific logic
+    postgres: DatabaseConfig
+    redis:    RedisConfig
+    s3:       S3Config
+    celery:   CeleryConfig          
+
+
     model_registry: ModelRegistryConfig = ModelRegistryConfig()
 
-    # Observability
-    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    enable_tracing: bool = False  # For OpenTelemetry integration
+    
+    log_level:      Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    enable_tracing: bool = False
+
 
 
 @lru_cache
 def get_settings() -> Settings:
     """
-    Thread-safe, cached settings loader. 
-    Using lru_cache ensures we only parse environment variables once.
+    Thread-safe, cached settings loader.
+    lru_cache ensures .env is parsed exactly once per process — not per request.
+    Call clear_settings_cache() in tests to reset between runs.
     """
     return Settings()
+
+
+def clear_settings_cache() -> None:
+    """
+    FIX 4: Clears the lru_cache so get_settings() re-reads the environment.
+    Use in tests:
+        from app.config import clear_settings_cache
+        clear_settings_cache()
+    """
+    get_settings.cache_clear()

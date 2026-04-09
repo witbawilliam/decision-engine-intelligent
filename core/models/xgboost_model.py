@@ -16,7 +16,7 @@ class NotFittedError(RuntimeError):
     """Raised when a model is used for inference before it has been trained."""
     pass
 
-# Setup structured logging
+
 logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ class XGBoostModel:
 
     def _initialize_model(self) -> Union[XGBClassifier, XGBRegressor]:
         """Initializes the model with production-optimized defaults."""
-        # Formula: High n_estimators + early_stopping (handled in fit) + low learning_rate
+        # Formulas
         default_params = {
             "n_estimators": 500,
             "learning_rate": 0.03,
@@ -117,9 +117,7 @@ class XGBoostModel:
         y = df[target_column]
         self.feature_names = X.columns
 
-        # Logic: Convert Categorical/Utf8 to XGBoost-friendly Category dtypes
-        # XGBoost 'hist' method requires categorical columns to be type 'category'
-        # We handle this via pandas transition (currently best for XGBoost/Polars compat)
+        
         X_pd = X.to_pandas()
         for col in X_pd.select_dtypes(["object", "category"]).columns:
             X_pd[col] = X_pd[col].astype("category")
@@ -136,7 +134,6 @@ class XGBoostModel:
         if not self._is_fitted:
             raise NotFittedError("Model must be fitted before prediction.")
 
-        # 1. Type Guard: Normalize input to Polars (Fixes the 'select' AttributeError)
         if isinstance(df, pd.DataFrame):
             df_pl = pl.from_pandas(df)
         elif isinstance(df, dict):
@@ -146,27 +143,24 @@ class XGBoostModel:
         else:
             raise TypeError(f"Inference requires Polars/Pandas DataFrame, got {type(df)}")
 
-        # 2. Feature Alignment
-        # Now df_pl is guaranteed to be a Polars object with the .select() method
+    
         X = df_pl.select(self.feature_names)
         X_pd = X.to_pandas()
         
-        # 3. Type Handling for XGBoost Categories
         for col in X_pd.select_dtypes(["object", "category"]).columns:
             X_pd[col] = X_pd[col].astype("category")
 
-        # 4. Inference Execution
         start_time = time.perf_counter()
         predictions = self.model.predict(X_pd)
         
         probabilities = None
         if self.problem_type == ProblemType.CLASSIFICATION:
-            # Some XGBoost versions return probabilities for all classes
+
             probabilities = self.model.predict_proba(X_pd)
             
         inference_time = (time.perf_counter() - start_time) * 1000
 
-        # 5. Return Structured Result
+        
         return ModelResult(
             predictions=predictions,
             probabilities=probabilities,

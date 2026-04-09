@@ -29,15 +29,6 @@ STATUS_ERROR   = "ERROR"
 
 @dataclass
 class TaskProgressReporter:
-    """
-    Thin wrapper around ``self.update_state`` that standardises the progress
-    payload shape and keeps progress-reporting calls out of business logic.
-
-    Usage
-    -----
-    progress = TaskProgressReporter(task=self, task_id=task_id)
-    progress.report("loading_data", percent=10)
-    """
 
     task: Task
     task_id: str
@@ -56,19 +47,7 @@ class TaskProgressReporter:
 
 
 def _load_data(dataset_path: str) -> pl.LazyFrame:
-    """
-    Return a *lazy* Polars frame for ``dataset_path``.
-
-    Keeping it lazy lets ``TabularPipeline`` push predicates and projections
-    down to the CSV reader, avoiding loading columns / rows it doesn't need.
-
-    Raises
-    ------
-    FileNotFoundError
-        Re-raised from Polars so the task decorator can handle it correctly.
-    OSError
-        Propagated for the autoretry machinery to catch.
-    """
+  
     return pl.scan_csv(dataset_path)
 
 
@@ -76,7 +55,6 @@ def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
     """
     Bridges the PipelineResult to V1.JobResultResponse.
     """
-    # Validate and construct the schema
     response = V1.JobResultResponse(
         job_id=task_id,
         status="completed",
@@ -128,7 +106,7 @@ class TaskProgressReporter:
     task_id: str
 
     def report(self, step: str, percent: int) -> None:
-        # Connect to V1 Schema for validation
+
         payload = V1.JobStatusResponse(
             job_id=self.task_id,
             status="running",
@@ -145,14 +123,7 @@ class TaskProgressReporter:
 
 
 class TrainingTask(Task):
-    """
-    Celery base class for training jobs.
-
-    Responsibilities
-    ----------------
-    * Structured failure logging (no PII, no large payloads).
-    * Hook point for future telemetry (Prometheus counter, Sentry breadcrumb).
-    """
+    
 
     abstract = True  
 
@@ -201,11 +172,10 @@ class TrainingTask(Task):
 @shared_task(
     bind=True,
     base=TrainingTask,
-    name="workers.tasks.train_tabular_task",
+    name="workers.tasks_training.tabular_task",
     queue="training",
     time_limit=3600,          
     soft_time_limit=3540,     
-    # Only retry infrastructure / I/O errors — logic bugs won't self-heal.
     autoretry_for=(OSError, IOError),
     dont_autoretry_for=(FileNotFoundError,),
     max_retries=3,
@@ -218,7 +188,6 @@ def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResul
     task_id = self.request.id
     progress = TaskProgressReporter(task=self, task_id=task_id)
 
-    # Wrap EVERYTHING in the RequestContext so all internal logs share the trace_id
     with RequestContext(trace_id=task_id):
         logger.info("Training job started", extra={"dataset_path": dataset_path})
 
@@ -229,9 +198,9 @@ def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResul
             progress.report("training_model", percent=30)
             
             pipeline = TabularPipeline(
-                dataframe=lazy_df, # Changed from lazy_frame to dataframe
+                dataframe=lazy_df, 
                 target_column=target_column,
-                # if your TabularPipeline doesn't take task_context, remove it!
+                
             )
 
             result = pipeline.run()
@@ -247,7 +216,7 @@ def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResul
 @shared_task(
     bind=True,
     base=TrainingTask,
-    name="workers.tasks.train_temporal_task",
+    name="workers.tasks_training.temporal_task",
     queue="training",
     time_limit=3600,
     soft_time_limit=3540,
@@ -282,10 +251,9 @@ def train_temporal_task(
         progress.report("loading_data", percent=10)
         df = _load_data(dataset_path).collect() 
 
-        # 2. Setup Configuration
+        
         config = TemporalPipelineConfig(**(config_dict or {}))
 
-        # 3. Build and Run Pipeline
         progress.report("feature_engineering", percent=30)
         pipeline = TemporalPipeline(
             dataframe=df,
@@ -296,13 +264,11 @@ def train_temporal_task(
         )
 
         progress.report("training_model", percent=60)
-        # Note: In your class, this calls _train which triggers _register_model
         result = pipeline.run() 
 
         progress.report("finalising", percent=90)
         return _build_success_result(task_id, result)
 
     except Exception as e:
-        # Standard error handling from your existing boilerplate
         logger.exception("Temporal pipeline failed", extra={"task_id": task_id})
         return _build_error_result(task_id, str(e))

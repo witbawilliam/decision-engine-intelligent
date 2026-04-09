@@ -21,6 +21,8 @@ from core.models.model_registry import ModelRegistry
 import pandas as pd
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
+from sklearn.metrics import accuracy_score, f1_score, precision_score
+from sklearn.model_selection import train_test_split
 
 logger = logging.getLogger(__name__)
 
@@ -116,10 +118,10 @@ class TabularPipeline(BasePipeline):
     def _validate(self) -> None:
         """
         Validation flow:
-        1. Detect problem type
-        2. Infer schema
-        3. Validate schema contract
-        4. Data quality audit
+          Detect problem type
+          Infer schema
+          Validate schema contract
+          Data quality audit
         """
 
         
@@ -188,7 +190,6 @@ class TabularPipeline(BasePipeline):
     
 
     def _split(self) -> None:
-        from sklearn.model_selection import train_test_split
 
         X = self.df.drop(self.target_column).to_pandas()
         y = self.df[self.target_column].to_pandas()
@@ -202,7 +203,6 @@ class TabularPipeline(BasePipeline):
         )
 
         
-        # self.feature_columns = list(self.X_train.columns)
 
         logger.info("Train-test split completed.")
 
@@ -257,8 +257,6 @@ class TabularPipeline(BasePipeline):
      
         
         if self.problem_type == ProblemType.CLASSIFICATION:
-        
-            from sklearn.metrics import accuracy_score, f1_score, precision_score
 
             # Ensure y_true matches the format of predictions
             y_true = self.y_test

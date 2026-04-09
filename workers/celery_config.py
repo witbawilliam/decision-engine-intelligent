@@ -1,31 +1,3 @@
-"""
-workers/celery_config.py
-=========================
-Enterprise Celery configuration for distributed ML workloads.
-
-Design principles
------------------
-* All secrets come from environment variables — no hardcoded credentials.
-* Every setting is documented with *why* it exists, not just what it does.
-* Queues are separated by workload profile (latency, memory, duration) so
-  a long-running training job never blocks a fast status-check task.
-* Sensible defaults make local development work out of the box; production
-  values are injected via environment variables or a secrets manager.
-
-Usage
------
-    from workers.celery_config import CelerySettings
-    celery_app.config_from_object(CelerySettings)
-
-Environment variables
----------------------
-CELERY_BROKER_URL           Redis / RabbitMQ connection string.
-CELERY_RESULT_BACKEND       Result store connection string.
-CELERY_BROKER_TRANSPORT_OPTIONS  JSON-encoded broker transport overrides.
-WORKER_CONCURRENCY          Number of worker processes (default: CPU count).
-WORKER_MAX_TASKS_PER_CHILD  Recycle after N tasks to prevent memory growth.
-TASK_ALWAYS_EAGER           Set to "true" to run tasks synchronously in tests.
-"""
 
 from __future__ import annotations
 
@@ -91,8 +63,8 @@ class CelerySettings:
 
     # Redis is the default for ML workloads — fast, supports pub/sub for
     # task-state streaming, and requires no schema management.
-    broker_url: str = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
-    result_backend: str = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+    broker_url: str = os.getenv("CELERY__BROKER_URL", "redis://localhost:6379/0")
+    result_backend: str = os.getenv("CELERY__RESULT_BACKEND", "redis://localhost:6379/1")
     # Use a separate Redis DB for results so a FLUSHDB on the broker
     # doesn't wipe pending task results (and vice-versa).
 
@@ -143,27 +115,28 @@ class CelerySettings:
         ),
     )
 
-    # Tasks that don't declare a queue explicitly land on "default".
+    
     task_default_queue: str = "default"
     task_default_exchange: str = "default"
     task_default_routing_key: str = "default"
 
-    # Static routing table — keeps routing logic out of individual task files.
-    # Pattern: "module.task_name": {"queue": ..., "routing_key": ...}
+    
     
     task_routes: dict = {
-        "workers.tasks.validate_dataset_task": {
+        "workers.tasks_validation.task_validation": {
             "queue": "validation",
             "routing_key": "validation",
         },
-        "workers.tasks.train_tabular_task": {
+        "workers.tasks_training.tabular_task": {
             "queue": "training",
             "routing_key": "training",
         },
-        "workers.tasks.train_forecasting_task": {
+
+        "workers.tasks_training.temporal_task":{
             "queue": "training",
-            "routing_key": "training",
-        },
+            "routing_key": "training"
+        }
+       
     }
 
     

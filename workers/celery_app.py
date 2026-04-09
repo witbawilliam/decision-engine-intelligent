@@ -18,9 +18,7 @@ def _create_app() -> Celery:
     app = Celery("automl_platform")
     app.config_from_object(CelerySettings)
 
-    # UPDATED: Explicitly discover your specific task files
-    # This ensures "workers.tasks_validate", "workers.tasks_train", etc. are registered
-    task_modules = ["tasks_validation", "tasks_training", "tasks_forecasting"]
+    task_modules = ["tasks_validation", "tasks_training"]
     
     for module in task_modules:
         app.autodiscover_tasks(
@@ -44,7 +42,7 @@ def dispatch_automl_task(task_type: str, payload: dict[str, Any]) -> AsyncResult
     task_mapping = {
         "validate": "workers.tasks_validation.task_validation",
         "train": "workers.tasks_training.task_training",
-        "forecast": "workers.tasks_forecasting.task_forecasting",
+        
     }
     
     task_name = task_mapping.get(task_type)

@@ -11,6 +11,10 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from app.config import get_settings
+
+
+settings = get_settings()
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +56,15 @@ class S3Client:
         region: str = "us-east-1",
         max_pool_connections: int = 50,
     ) -> None:
-        self.bucket_name = bucket_name
-        self._region = region
+        self.bucket_name = bucket_name or settings.s3.bucket_name
+        self._region = region or settings.s3.region
+
+        resolved_endpoint =endpoint_url or settings.s3.boto3_endpoint()
+        resolved_key =access_key or settings.s3.access_key
+        resolved_secret =secret_key or settings.s3.secret_key
 
         self._config = Config(
-            region_name=region,
+            region_name=self._region,
             signature_version="s3v4",
             retries={"max_attempts": 3, "mode": "adaptive"},
             max_pool_connections=max_pool_connections,
@@ -64,13 +72,13 @@ class S3Client:
 
         self._client = boto3.client(
             "s3",
-            endpoint_url=endpoint_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
+            endpoint_url=resolved_endpoint,
+            aws_access_key_id=resolved_key,
+            aws_secret_access_key=resolved_secret,
             config=self._config,
         )
 
-        if os.getenv("ENV") != "production":
+        if settings.environment != "production":
             self._ensure_bucket()
 
     

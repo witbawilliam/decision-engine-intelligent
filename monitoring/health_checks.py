@@ -1,4 +1,5 @@
 
+
 from __future__ import annotations
 
 import hashlib
@@ -33,6 +34,9 @@ except ImportError:
 from storage.redis_client import RedisClient
 from storage.postgres_client import PostgresClient
 from storage.s3_client import S3Client
+from app.config import get_settings
+
+settings = get_settings()
 
 logger = logging.getLogger("health_check")
 

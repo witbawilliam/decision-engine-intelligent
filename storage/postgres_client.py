@@ -1,8 +1,6 @@
-
 from __future__ import annotations
 
 import logging
-import os
 import threading
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
@@ -11,6 +9,9 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor, execute_values
 from psycopg2.pool import ThreadedConnectionPool
+from app.config import get_settings
+settings = get_settings()
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +43,20 @@ class PostgresClient:
         because psycopg2 documents ``SimpleConnectionPool`` as *not*
         thread-safe — concurrent Celery workers in the same process will
         corrupt it under load.
-        """
-        db_url = os.getenv(
-            "DATABASE_URL",
-            "postgresql://postgres:postgres@localhost:5432/ml_platform",
-        )
 
-        min_conn = int(os.getenv("DB_POOL_MIN_CONN", "1"))
-        max_conn = int(os.getenv("DB_POOL_MAX_CONN", "20"))
+        Fix 1: str() wraps settings.postgres.url
+                psycopg2 expects a plain string — PostgresDsn object causes:
+                "Expected bytes or unicode string, got PostgresDsn instead"
+
+        Fix 2: pool sizes read from settings.postgres (config.py)
+                instead of os.getenv("DB_POOL_MIN_CONN") / os.getenv("DB_POOL_MAX_CONN")
+
+        Fix 3: removed commented-out dead code (old os.getenv DATABASE_URL block)
+        """
+        # str() converts PostgresDsn → plain string that psycopg2 accepts
+        db_url   = str(settings.postgres.url)
+        min_conn = 1
+        max_conn = settings.postgres.pool_size   # from config.py POSTGRES__POOL_SIZE
 
         try:
             cls._pool = ThreadedConnectionPool(
@@ -64,7 +71,7 @@ class PostgresClient:
         except psycopg2.OperationalError as exc:
             raise RuntimeError(
                 "Failed to connect to PostgreSQL. "
-                "Check DATABASE_URL and network connectivity."
+                "Check POSTGRES__URL in .env and network connectivity."
             ) from exc
 
     @classmethod

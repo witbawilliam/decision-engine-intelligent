@@ -1,30 +1,3 @@
-
-
-"""
-services/prediction_service.py
-
-Central prediction orchestration service.
-
-Design pillars enforced in this file
-
-Observability   — Every log is a JSON object with `timestamp` and `trace_id`
-                  via logging_config.get_logger() + RequestContext.
-                  MetricsRegistry records latency, cache hits, errors.
-
-Reliability     — asyncio.wait_for() wraps every pipeline and DB call so
-                  no operation can hang indefinitely. Configurable timeouts
-                  per operation type.
-
-Scalability     — PredictionService holds zero mutable prediction state.
-                  All per-request data (cache, counters) lives in RedisClient.
-                  The service itself can be instantiated in any number of
-                  workers simultaneously.
-
-Testability     — TemporalPipeline, TabularPipeline, RedisClient, and
-                  PostgresClient are injected via __init__ so any of them
-                  can be replaced with a mock in unit tests.
-"""
-
 from __future__ import annotations
 
 import asyncio

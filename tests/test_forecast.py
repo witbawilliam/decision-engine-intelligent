@@ -23,7 +23,6 @@ class TestForecastingTask:
     @pytest.fixture
     def mock_pipeline_result(self):
         result = MagicMock()
-        # Pydantic requires real strings, not MagicMock objects
         result.model_name = "ProphetForecaster"
         result.model_version = "1.0.0" 
         result.horizon = 24

@@ -140,7 +140,6 @@ class DataQualityAnalyzer:
             try:
                 self.df[col].cast(pl.Float64)
             except Exception:
-                # If cast fails but column is not string, it's mixed
                 if self.df[col].dtype == pl.Object:
                     self.warnings.append(
                         f"Column '{col}' may contain mixed data types."

@@ -6,14 +6,10 @@ from typing import Any, Tuple, Optional, Protocol
 
 import polars as pl
 from pydantic import BaseModel, Field, ConfigDict
-
-# Internal imports
 from .uptimization_strategy import BinaryRefinementSearch
 from .manifold_guard import ManifoldGuard
 from core.contracts.schema_validator import SchemaValidator, BaseModel, ColumnContract
 
-
-# register types
 
 NUMERIC_DTYPES = {
                 pl.Int8, pl.Int16, pl.Int32, pl.Int64,
@@ -24,17 +20,10 @@ NUMERIC_DTYPES = {
 
 
 
-
-# Model Interface Contract
-
-
 class PredictModel(Protocol):
     def predict(self, data: pl.DataFrame) -> Any:
         ...
 
-
-
-# Domain Enums
 
 
 class OptimizationStatus(str, Enum):
@@ -45,7 +34,7 @@ class OptimizationStatus(str, Enum):
     FAILED = "FAILED"
 
 
-# Response Schema (API Safe)
+
 
 class CounterfactualResult(BaseModel):
     """
@@ -64,16 +53,8 @@ class CounterfactualResult(BaseModel):
     message: Optional[str] = None
 
 
-# Orchestrator
-
 class CounterfactualOrchestrator:
-    """
-    Enterprise-grade counterfactual engine.
 
-    Modes:
-        strict=True  -> Raises exceptions
-        strict=False -> Returns structured failure object
-    """
 
     def __init__(
         self,
@@ -94,13 +75,13 @@ class CounterfactualOrchestrator:
         self.risk_threshold = float(risk_threshold)
         self.tolerance = float(reachability_tolerance)
 
-        # Components
+        
         self._optimizer = BinaryRefinementSearch(model)
         self._guard = ManifoldGuard()
         self._guard.fit(training_data)
 
     
-    # Public API
+    
 
     def explain_how_to_hit_target(
         self,
@@ -126,7 +107,7 @@ class CounterfactualOrchestrator:
             )
 
     
-    # Core Execution
+    
 
     def _execute_core_logic(
         self,
@@ -178,7 +159,7 @@ class CounterfactualOrchestrator:
         )
 
     
-    # Evaluation Logic
+    
     
 
     def _evaluate_status(
@@ -212,7 +193,7 @@ class CounterfactualOrchestrator:
             return "Target unreachable within given bounds."
         return "Optimization failed."
 
-    # Validation
+    
 
     def _validate_inputs(
         self,
@@ -234,7 +215,7 @@ class CounterfactualOrchestrator:
         if bnds[0] >= bnds[1]:
             raise ValueError("Lower bound must be strictly less than upper bound.")
 
-    # Failure Builder
+    
 
     def _build_failure_response(
         self,

@@ -18,7 +18,6 @@ class TemporalFeatureConfig:
 
 class TemporalFeatureEngineer:
     """
-    Enterprise-grade Temporal Engineering Engine.
     Transforms raw Timestamps into high-dimensional feature vectors.
     """
     
@@ -33,7 +32,6 @@ class TemporalFeatureEngineer:
         expressions = []
         
         for col in date_cols:
-            # 1. Standard Decomposition (Polynomial Features)
             expressions.extend([
                 pl.col(col).dt.year().alias(f"{col}_year"),
                 pl.col(col).dt.month().alias(f"{col}_month"),

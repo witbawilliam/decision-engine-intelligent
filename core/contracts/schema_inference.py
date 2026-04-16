@@ -35,7 +35,6 @@ class SchemaInference:
 
         groups = self._group_by_physical_type()
         
-        # Identifies columns that are technically numbers but semantically categories
         refined = self._refine_semantics(groups)
         
         ids = self._discover_ids(refined)

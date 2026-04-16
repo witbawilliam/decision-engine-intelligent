@@ -6,12 +6,12 @@ from typing import Dict, Optional, Union, Any
 
 import numpy as np
 
-# Structured logging for production traceability
+
 logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class RegressionMetricResult:
-    """Immutable diagnostic container for regression performance."""
+    
     mae: float
     mse: float
     rmse: float
@@ -20,17 +20,14 @@ class RegressionMetricResult:
     mape: Optional[float]
     median_absolute_error: float
     explained_variance: Optional[float]
-    max_error: float            # Added: Worst-case scenario
-    mean_squared_log_error: Optional[float]  # Added: For exponential growth targets
+    max_error: float            
+    mean_squared_log_error: Optional[float]  
 
     def to_dict(self) -> Dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
 class RegressionMetrics:
-    """
-    High-Performance Regression Evaluation Engine.
-    Engineered for numerical stability and high-dimensional feature spaces.
-    """
+    
 
     def __init__(self, epsilon: float = 1e-9):
         self.epsilon = epsilon
@@ -42,10 +39,8 @@ class RegressionMetrics:
         y_pred: Union[np.ndarray, list],
         n_features: Optional[int] = None
     ) -> RegressionMetricResult:
-        """
-        Calculates a full suite of regression diagnostics with safety guards.
-        """
-        # Convert to flat numpy arrays for vectorized performance
+        
+        
         y_true = np.asarray(y_true).ravel()
         y_pred = np.asarray(y_pred).ravel()
 
@@ -54,7 +49,7 @@ class RegressionMetrics:
         if y_true.shape != y_pred.shape:
             raise ValueError(f"Shape mismatch: y_true {y_true.shape} != y_pred {y_pred.shape}")
 
-        # Core error metrics
+        
         errors = y_true - y_pred
         abs_errors = np.abs(errors)
         
@@ -64,7 +59,7 @@ class RegressionMetrics:
         median_abs = float(np.median(abs_errors))
         max_err = float(np.max(abs_errors))
 
-        # Statistical fitness metrics
+        
         r2 = self._r2(y_true, y_pred)
         adj_r2 = self._adjusted_r2(r2, len(y_true), n_features)
         mape = self._mape(y_true, y_pred)
@@ -85,7 +80,7 @@ class RegressionMetrics:
         )
 
     
-    # STABLE METRIC DEFINITIONS
+    
     
 
     def _r2(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:

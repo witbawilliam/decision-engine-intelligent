@@ -85,7 +85,6 @@ class TabularIntelligenceEngine:
         )
 
 
-    # PROBLEM TYPE DETECTION
     
     def _detect_problem_type(self) -> Optional[str]:
 
@@ -101,14 +100,10 @@ class TabularIntelligenceEngine:
         unique_values = target_series.n_unique()
 
         
-        # Forecasting detection
-        
         if any(t in DATETIME_DTYPES for t in self.df.dtypes):
             if dtype in NUMERIC_DTYPES:
                 return "forecasting"
 
-        
-        # Classification detection
         
         integer_types = {
             pl.Int8, pl.Int16, pl.Int32, pl.Int64,
@@ -116,17 +111,14 @@ class TabularIntelligenceEngine:
         }
 
         if dtype in integer_types:
-            # Binary classification
             if unique_values == 2:
                 return "classification"
 
-            # Multi-class classification (low cardinality)
+            # Multi-class classification
             cardinality_ratio = unique_values / total_rows
             if unique_values <= 20 and cardinality_ratio < 0.5:
                 return "classification"
 
-        
-        # Regression detection
     
         if dtype in {pl.Float32, pl.Float64}:
             return "regression"
@@ -134,8 +126,6 @@ class TabularIntelligenceEngine:
         
         return None
     
-
-    # FEATURE ENGINEERING
     
 
     def engineer_features(self) -> pl.DataFrame:

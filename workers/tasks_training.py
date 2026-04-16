@@ -5,6 +5,10 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from datetime import datetime, timezone
+import os
+import tempfile
+from storage.s3_client import S3Client
+from storage.postgres_client import PostgresClient
 
 import polars as pl
 from celery import Task, shared_task
@@ -168,49 +172,83 @@ class TrainingTask(Task):
 
 
 
-
 @shared_task(
     bind=True,
     base=TrainingTask,
     name="workers.tasks_training.tabular_task",
     queue="training",
-    time_limit=3600,          
-    soft_time_limit=3540,     
+    time_limit=3600,
+    soft_time_limit=3540,
     autoretry_for=(OSError, IOError),
     dont_autoretry_for=(FileNotFoundError,),
     max_retries=3,
-    retry_backoff=True,       
+    retry_backoff=True,
     retry_backoff_max=120,
-    retry_jitter=True,        
+    retry_jitter=True,
 )
-
-def train_tabular_task(self, dataset_path: str, target_column: str) -> TaskResult:
+def train_tabular_task(self, job_payload: dict) -> TaskResult:
     task_id = self.request.id
-    progress = TaskProgressReporter(task=self, task_id=task_id)
+    job_id  = job_payload.get("idempotency_key") or task_id
+    progress = TaskProgressReporter(task=self, task_id=job_id)
+
+    
+    PostgresClient.upsert(
+        table="jobs",
+        data={"id": job_id, "status": "running", "progress": 0,
+              "updated_at": datetime.now(timezone.utc)},
+        conflict_columns=["id"],
+    )
 
     with RequestContext(trace_id=task_id):
-        logger.info("Training job started", extra={"dataset_path": dataset_path})
-
         try:
-            progress.report("loading_data", percent=10)
-            lazy_df = _load_data(dataset_path)
-
-            progress.report("training_model", percent=30)
             
-            pipeline = TabularPipeline(
-                dataframe=lazy_df, 
-                target_column=target_column,
-                
+            s3 = S3Client(
+                bucket_name=os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
+                endpoint_url=os.getenv("S3__ENDPOINT_URL"),
+                access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+                region=os.getenv("AWS_REGION", "us-east-1"),
             )
 
-            result = pipeline.run()
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                local_path = os.path.join(tmp_dir, "dataset.parquet")
+                s3.download_file(
+                    object_name=job_payload["s3_key"],
+                    local_path=local_path,
+                )
+
+                progress.report("loading_data", percent=10)
+                lazy_df = pl.scan_parquet(local_path)  # ← parquet not csv
+
+                progress.report("training_model", percent=30)
+                pipeline = TabularPipeline(
+                    dataframe=lazy_df,
+                    target_column=job_payload["target_column"],
+                )
+                result = pipeline.run()
 
             progress.report("finalising", percent=90)
-            return _build_success_result(task_id, result)
+
+            
+            PostgresClient.upsert(
+                table="jobs",
+                data={"id": job_id, "status": "completed", "progress": 100,
+                      "updated_at": datetime.now(timezone.utc)},
+                conflict_columns=["id"],
+            )
+
+            return _build_success_result(job_id, result)
 
         except Exception as e:
+            PostgresClient.upsert(
+                table="jobs",
+                data={"id": job_id, "status": "failed", "progress": 0,
+                      "updated_at": datetime.now(timezone.utc),
+                      "failure_reason": str(e)},
+                conflict_columns=["id"],
+            )
             logger.exception("Unexpected error during training")
-            return _build_error_result(task_id, str(e))
+            return _build_error_result(job_id, str(e))
         
 
 @shared_task(

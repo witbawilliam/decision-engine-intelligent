@@ -85,6 +85,8 @@ class V1:
         filename: str
         target_column: Optional[str] = None
         problem_type: Optional[ProblemType] = None
+        s3_key: Optional[str] = None            # ← S3 path to the uploaded dataset
+        reference_s3_key: Optional[str] = None
 
     class JobStatusResponse(BaseModel):
         """Used for training updates"""
@@ -102,10 +104,6 @@ class V1:
         insight_summary: Optional[str] = None
 
     
-    class FeedbackRequest(BaseModel):
-        job_id: IdempotencyKeyStr
-        rating: int = Field(ge=1, le=5)
-        comment: Optional[str] = Field(None, max_length=500)
 
     class FeedbackResponse(BaseModel):
         status: str = "success"

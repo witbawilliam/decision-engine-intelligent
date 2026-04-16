@@ -7,7 +7,6 @@ from typing import Dict, List, Optional
 import numpy as np
 import polars as pl
 
-# register types
 
 NUMERIC_DTYPES = {
                 pl.Int8, pl.Int16, pl.Int32, pl.Int64,
@@ -19,7 +18,7 @@ NUMERIC_DTYPES = {
 
 class ManifoldGuard:
     """
-    SaaS-grade statistical manifold guard.
+    statistical manifold guard.
 
     - Serializable
     - Versioned
@@ -42,8 +41,6 @@ class ManifoldGuard:
         self._feature_count: int = 0
 
     
-    # Training Phase
-    
 
     def fit(self, df: pl.DataFrame):
 
@@ -65,7 +62,7 @@ class ManifoldGuard:
         self._mean = matrix.mean(axis=0)
         self._std = matrix.std(axis=0)
 
-        # Avoid zero variance explosion
+        
         self._std[self._std < 1e-9] = 1e-9
 
         self._numeric_columns = numeric_cols
@@ -78,7 +75,7 @@ class ManifoldGuard:
         )
 
     
-    # Inference Phase
+    
     
     def get_risk_score(self, row: pl.DataFrame) -> float:
 
@@ -88,7 +85,6 @@ class ManifoldGuard:
         if row.height != 1:
             raise ValueError("Risk scoring requires a single row.")
 
-        # Align features safely
         try:
             numeric_row = row.select(self._numeric_columns).to_numpy()
         except Exception:
@@ -96,16 +92,15 @@ class ManifoldGuard:
 
         standardized = (numeric_row - self._mean) / self._std
 
-        # L2 norm
         distance = np.linalg.norm(standardized)
 
-        # Logistic-style scaling (SaaS-friendly smooth curve)
+        # Logistic-style scaling smooth curve
         risk = 1 - np.exp(-distance / np.sqrt(self._feature_count))
 
         return float(np.clip(risk, 0.0, 1.0))
 
     
-    # Drift Detection (Batch Mode)
+    
     
 
     def compute_population_drift(self, df: pl.DataFrame) -> float:
@@ -129,8 +124,6 @@ class ManifoldGuard:
 
         return float(np.clip(drift_score, 0.0, 1.0))
 
-    
-    # Serialization
     
 
     def save(self, path: str):

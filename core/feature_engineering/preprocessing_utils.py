@@ -60,27 +60,21 @@ class FeatureProcessor:
         if df.height == 0:
             raise ValueError("Inference failed: DataFrame contains zero records.")
 
-        #  Deduplication (Eager - changes row count)
         df, removed_count = self._remove_duplicates(df)
 
-        #  Type Discovery
         schema = df.schema
         numeric_cols = [c for c, t in schema.items() if t.is_numeric() and c != self.target_column]
         cat_cols = [c for c, t in schema.items() if (t.is_temporal() or t == pl.Utf8 or t == pl.Categorical) and c != self.target_column]
 
-        #  Leakage & Variance Detection
         leaked = self._detect_leakage(df, numeric_cols)
         low_variance = self._detect_low_variance(df, numeric_cols + cat_cols)
         to_drop = list(set(leaked + low_variance))
 
-        # Final Pipeline Construction (Lazy)
         df_lazy = df.lazy().drop(to_drop)
         
-        # Apply vectorised imputation and encoding in a single graph
         df_lazy = self._apply_imputation(df_lazy, numeric_cols, cat_cols, to_drop)
         df_lazy = self._apply_encoding(df_lazy, cat_cols, to_drop)
 
-        #  Imbalance Check
         is_imbalanced = self._check_imbalance(df)
 
         return df_lazy.collect(), PreprocessingMetadata(
@@ -101,7 +95,6 @@ class FeatureProcessor:
 
         leaked = []
         for col in cols:
-            # Avoid divide by zero/null corr
             corr = df.select(pl.corr(col, self.target_column)).item()
             if corr is not None and abs(corr) >= self.leakage_threshold:
                 leaked.append(col)

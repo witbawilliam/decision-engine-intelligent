@@ -69,7 +69,6 @@ class ProductionMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = f"{process_time:.4f}s"
 
-        #track_training_latency.observe(process_time)
 
         logger.info(
             "request_completed",

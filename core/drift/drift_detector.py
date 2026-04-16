@@ -40,7 +40,6 @@ class DriftDetector:
             if col not in current_df.columns:
                 continue
 
-            # Only numeric columns
             if reference_df[col].dtype not in (
                 pl.Float32, pl.Float64, pl.Int32, pl.Int64
             ):
@@ -49,7 +48,6 @@ class DriftDetector:
             ref_data = reference_df[col].drop_nulls().to_numpy()
             curr_data = current_df[col].drop_nulls().to_numpy()
 
-            # Skip if empty
             if len(ref_data) == 0 or len(curr_data) == 0:
                 continue
 

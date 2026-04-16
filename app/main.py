@@ -1,20 +1,17 @@
 """
-main.py
-
-Entry point for the Enterprise ML Platform.
 
 What this file connects
-────────────────────────
-config.py           → get_settings() — loads all env vars once on startup
-middleware.py       → ProductionMiddleware — request ID, latency, error handling
-health_checks.py    → HealthChecker — liveness, readiness, startup, full report
-routes_upload.py    → /api/v1/datasets  — file upload + merge
-routes_jobs.py      → /api/v1/train     — training job dispatch via Celery
-routes_inference.py → /api/v1/inference — real-time prediction via PredictionService
-routes_feedback.py  → /api/v1/feedback  — prediction feedback storage
+
+config.py            get_settings() — loads all env vars once on startup
+middleware.py        ProductionMiddleware — request ID, latency, error handling
+health_checks.py     HealthChecker — liveness, readiness, startup, full report
+routes_upload.py     /api/v1/datasets  — file upload + merge
+routes_jobs.py       /api/v1/train     — training job dispatch via Celery
+routes_inference.py  /api/v1/inference — real-time prediction via PredictionService
+routes_feedback.py   /api/v1/feedback  — prediction feedback storage
 
 Startup sequence
-────────────────
+
 1. Settings validated  — missing env vars crash immediately with a clear error
 2. Logging configured  — structured JSON logs from boot
 3. FastAPI app created

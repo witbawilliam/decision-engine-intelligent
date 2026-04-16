@@ -11,12 +11,11 @@ import polars as pl
 import shap
 from xgboost import XGBModel
 
-# Configure Structured Logging
 logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ExplanationResult:
-    """Enterprise-grade container for model interpretations."""
+    
     shap_values: np.ndarray
     shap_importance: Dict[str, float]
     gain_importance: Dict[str, float]
@@ -25,7 +24,7 @@ class ExplanationResult:
     feature_names: List[str]
 
     def to_polars(self) -> pl.DataFrame:
-        """Convert SHAP values to a structured Polars DataFrame for downstream analysis."""
+    
         return pl.DataFrame(self.shap_values, schema=self.feature_names)
 
 class XGBExplainer:
@@ -43,8 +42,6 @@ class XGBExplainer:
         self.model = model
         self.feature_names = feature_names
         
-        # Enterprise Guard: SHAP requires a background dataset for certain models 
-        # to calculate 'expected_value' accurately.
         bg_np = background_data.to_numpy() if background_data is not None else None
         
         try:
@@ -63,16 +60,13 @@ class XGBExplainer:
         """
         start_time = time.perf_counter()
         
-        # Zero-copy conversion for SHAP
         X = df.to_numpy()
 
-        # SHAP calculation
+        
         try:
-            # check_additivity=True ensures that sum(SHAP) + expected_value == prediction
-            # This is critical for regulatory audits (Finance/Healthcare)
+            
             shap_output = self.explainer(X, check_additivity=check_additivity)
             
-            # Extract values based on SHAP version/output type
             shap_values = shap_output.values
             expected_value = shap_output.base_values[0] if hasattr(shap_output.base_values, "__len__") else shap_output.base_values
 
@@ -80,12 +74,10 @@ class XGBExplainer:
             logger.error(f"Inference explanation failed: {e}")
             raise
 
-        # Handle Classification (Multi-class) vs Regression (Single-output)
-        if len(shap_values.shape) == 3:  # (rows, features, classes)
+        if len(shap_values.shape) == 3:  
             logger.info("Multi-class detected. Reducing to target class index 0.")
             shap_values = shap_values[:, :, 0]
 
-        # Compute Importance Metrics
         shap_importance = self._compute_shap_importance(shap_values)
         gain_importance = self._compute_gain_importance()
 
@@ -101,13 +93,13 @@ class XGBExplainer:
         )
 
     def _compute_shap_importance(self, shap_values: np.ndarray) -> Dict[str, float]:
-        """Calculates global importance via mean absolute SHAP values."""
+
         mean_abs_shap = np.abs(shap_values).mean(axis=0)
         
         importance = {
             name: float(val) for name, val in zip(self.feature_names, mean_abs_shap)
         }
-        # Sort by importance descending
+
         return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
 
     def _compute_gain_importance(self) -> Dict[str, float]:
@@ -117,11 +109,8 @@ class XGBExplainer:
         """
         booster = self.model.get_booster()
         gain_scores = booster.get_score(importance_type="gain")
-        
-        # XGBoost often returns keys like 'f0', 'f1'. We map them to logical names.
         importance = {}
         for i, name in enumerate(self.feature_names):
-            # Try both the name and the positional key 'f{i}'
             val = gain_scores.get(name) or gain_scores.get(f"f{i}", 0.0)
             importance[name] = float(val)
             

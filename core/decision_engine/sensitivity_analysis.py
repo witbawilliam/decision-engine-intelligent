@@ -9,16 +9,9 @@ from pydantic import BaseModel, Field, ConfigDict
 
 
 
-# Model Interface
-
-
 class PredictModel(Protocol):
     def predict(self, data: pl.DataFrame) -> Any:
         ...
-
-
-
-# Response Schema
 
 
 class FeatureSensitivity(BaseModel):
@@ -26,7 +19,7 @@ class FeatureSensitivity(BaseModel):
 
     feature: str
     baseline_value: float
-    sensitivity_score: float  # Normalized importance
+    sensitivity_score: float  
     max_prediction_shift: float
 
 
@@ -37,13 +30,9 @@ class SensitivityResult(BaseModel):
     feature_rankings: List[FeatureSensitivity]
 
 
-
-# Sensitivity Engine
-
-
 class SensitivityAnalyzer:
     """
-    Production-grade local sensitivity analysis engine.
+     local sensitivity analysis engine.
 
     Uses finite difference perturbation.
     Model-agnostic.
@@ -62,7 +51,6 @@ class SensitivityAnalyzer:
             raise TypeError("Model must implement predict(pl.DataFrame)")
 
     
-    # Public API
 
     def analyze(self, row: pl.DataFrame) -> SensitivityResult:
 
@@ -75,7 +63,7 @@ class SensitivityAnalyzer:
 
         for column in row.columns:
             if not pl.datatypes.is_numeric(row.schema[column]):
-                continue  # Skip non-numeric safely
+                continue 
 
             base_val = float(row.get_column(column)[0])
 
@@ -129,7 +117,7 @@ class SensitivityAnalyzer:
                 )
             )
 
-        # Sort descending
+        
 
         results.sort(key=lambda x: x.sensitivity_score, reverse=True)
 
@@ -138,7 +126,7 @@ class SensitivityAnalyzer:
             feature_rankings=results,
         )
 
-    # Internal Prediction Wrapper
+    
     
     def _predict(self, row: pl.DataFrame) -> float:
         raw = self._model.predict(row)

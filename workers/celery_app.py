@@ -41,7 +41,8 @@ def dispatch_automl_task(task_type: str, payload: dict[str, Any]) -> AsyncResult
     """
     task_mapping = {
         "validate": "workers.tasks_validation.task_validation",
-        "train": "workers.tasks_training.task_training",
+        "train": "workers.tasks_training.tabular_task",
+        "forecast":  "workers.tasks_training.temporal_task",
         
     }
     

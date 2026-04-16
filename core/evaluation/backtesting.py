@@ -10,10 +10,10 @@ import polars as pl
 import numpy as np
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-#  Logger Configuration
+
 logger = logging.getLogger(__name__)
 
-#  Protocol for Type-Safe Models 
+
 class ModelInterface(Protocol):
     def fit(self, df: pl.DataFrame) -> None: ...
     def predict(self, horizon: int) -> Any: ...
@@ -25,21 +25,18 @@ class BacktestResult:
     fold_metrics: List[Dict[str, float]]
     avg_mae: float
     avg_rmse: float
-    volatility_mae: float  # Measure of performance stability
+    volatility_mae: float  
     execution_time_sec: float
 
 @dataclass
 class RegimeComparison:
-    """Enterprise-grade comparison of Expanding vs Sliding behavior."""
+    """ comparison of Expanding vs Sliding behavior."""
     winning_strategy: str
     drift_detected: bool
     performance_gap: float
 
 class TimeSeriesBacktester:
-    """
-    High-Performance Backtesting Engine.
-    Features: Parallel fold execution, Polars-native slicing, and Drift Analysis.
-    """
+    
 
     def __init__(
         self,
@@ -47,7 +44,7 @@ class TimeSeriesBacktester:
         datetime_column: str,
         target_column: str,
         forecast_horizon: int,
-        n_jobs: int = -1  # Parallelize folds
+        n_jobs: int = -1  
     ):
         self.df = df.sort(datetime_column)
         self.datetime_column = datetime_column
@@ -55,8 +52,6 @@ class TimeSeriesBacktester:
         self.horizon = forecast_horizon
         self.n_jobs = n_jobs
 
-    
-    # REFACTORED CORE LOGIC
     
 
     def run_backtest(
@@ -75,8 +70,6 @@ class TimeSeriesBacktester:
         
         metrics = []
         
-        #  use ProcessPoolExecutor for parallel training
-        # Note: model_factory must be pickleable for multiprocessing
         for train, test in folds:
             fold_metric = self._evaluate_fold(model_factory, train, test)
             metrics.append(fold_metric)
@@ -85,7 +78,7 @@ class TimeSeriesBacktester:
         return self._aggregate(strategy, metrics, duration)
 
     def _generate_folds(self, strategy: str, initial_size: int, window_size: int, step: int):
-        """Yields train/test pairs using zero-copy Polars slicing."""
+        
         if strategy == "expanding":
             for end in range(initial_size, self.df.height - self.horizon, step):
                 yield self.df[:end], self.df[end : end + self.horizon]
@@ -98,17 +91,15 @@ class TimeSeriesBacktester:
                 )
 
     def _evaluate_fold(self, model_factory, train: pl.DataFrame, test: pl.DataFrame) -> Dict[str, float]:
-        """Evaluates a single temporal split."""
+        
         model = model_factory()
         model.fit(train)
         
-        # Support both Prophet-style and XGBoost-style predict returns
         forecast = model.predict(self.horizon)
         
-        # Handle different prediction return formats safely
         if isinstance(forecast, dict) and "yhat" in forecast:
             y_pred = forecast["yhat"][-self.horizon:]
-        elif hasattr(forecast, "forecast"): # Original code's specific structure
+        elif hasattr(forecast, "forecast"): 
             y_pred = forecast.forecast["yhat"][-self.horizon:]
         else:
             y_pred = forecast
@@ -117,7 +108,6 @@ class TimeSeriesBacktester:
         
         return self._compute_metrics(y_true, np.array(y_pred))
 
-    # ENTERPRISE: REGIME DETECTION
 
 
     def analyze_regime_change(
@@ -132,7 +122,6 @@ class TimeSeriesBacktester:
         """
         gap = (expanding_res.avg_mae - sliding_res.avg_mae) / expanding_res.avg_mae
         
-        # If sliding window is 15% better, we have a regime shift
         drift = gap > 0.15
         winner = "sliding" if sliding_res.avg_mae < expanding_res.avg_mae else "expanding"
         
@@ -159,6 +148,6 @@ class TimeSeriesBacktester:
             fold_metrics=metrics,
             avg_mae=float(np.mean(maes)),
             avg_rmse=float(np.mean(rmses)),
-            volatility_mae=float(np.std(maes)), # Critical for assessing model reliability
+            volatility_mae=float(np.std(maes)), 
             execution_time_sec=duration
         )

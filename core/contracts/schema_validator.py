@@ -54,7 +54,10 @@ class ValidationRule(Protocol):
 
 class EmptyDatasetRule:
     def verify(self, df: pl.DataFrame, *_) -> Optional[str]:
-        return "Critical: Input DataFrame is empty." if df.height == 0 else None
+        if df.height == 0:
+          return "Critical: Input DataFrame is empty." 
+        else:
+            return None
 
 class TargetIntegrityRule:
     def verify(self, df: pl.DataFrame, schema: DatasetSchema, *_) -> Optional[str]:

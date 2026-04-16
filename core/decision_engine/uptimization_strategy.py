@@ -26,18 +26,15 @@ class BinaryRefinementSearch:
         low, high = bounds
         best_lever_value = low
         
-        #  Determine direction: Does increasing lever increase target?
         test_low = base_row.with_columns(pl.lit(low).alias(lever_col))
         test_high = base_row.with_columns(pl.lit(high).alias(lever_col))
         
         pred_low = self.model.predict(test_low)[0]
         pred_high = self.model.predict(test_high)[0]
         
-        # If the goal is outside the model's current range, return the boundary
         if target_goal <= min(pred_low, pred_high): return low
         if target_goal >= max(pred_low, pred_high): return high
 
-        #  Binary Search Loop
         for _ in range(self.max_iters):
             mid = (low + high) / 2
             current_row = base_row.with_columns(pl.lit(mid).alias(lever_col))

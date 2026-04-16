@@ -81,8 +81,6 @@ class ForecastingMetrics:
         )
 
 
-    # STABLE METRIC DEFINITIONS
-
 
     def _mae(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
         return float(np.mean(np.abs(y_true - y_pred)))
@@ -91,14 +89,11 @@ class ForecastingMetrics:
         return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
     def _bias(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """
-        Calculates normalized forecast bias. 
-        Positive = Under-forecasting; Negative = Over-forecasting.
-        """
+       
         return float(np.sum(y_true - y_pred) / (np.sum(y_true) + 1e-9))
 
     def _mape(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
-        """Safe MAPE: Returns None instead of Inf if zeros are present."""
+        
         mask = np.abs(y_true) > 1e-9
         if not np.any(mask):
             logger.warning("MAPE undefined: all actuals are zero.")
@@ -106,7 +101,7 @@ class ForecastingMetrics:
         return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
 
     def _smape(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """Stable Symmetric MAPE calculation."""
+        
         denominator = (np.abs(y_true) + np.abs(y_pred))
         mask = denominator > 1e-9
         if not np.any(mask):
@@ -115,7 +110,7 @@ class ForecastingMetrics:
         return float(200.0 * np.mean(np.abs(y_true[mask] - y_pred[mask]) / denominator[mask]))
 
     def _wape(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
-        """Weighted Absolute Percentage Error (often called Volume Weighted MAPE)."""
+        
         actual_sum = np.sum(np.abs(y_true))
         if actual_sum < 1e-9:
             return 0.0 if np.sum(np.abs(y_pred)) < 1e-9 else 100.0
@@ -137,8 +132,6 @@ class ForecastingMetrics:
         if len(y_train) <= m:
             logger.debug("MASE: y_train shorter than seasonal period.")
             return None
-
-        # Calculate the absolute scale of a seasonal naive forecast
         naive_error = np.abs(y_train[m:] - y_train[:-m])
         scale = np.mean(naive_error)
 

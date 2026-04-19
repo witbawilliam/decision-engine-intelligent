@@ -47,6 +47,7 @@ services:
       - "8000:8000"
     volumes:
       - .:/app
+      - ./ml_registry:/app/ml_registry
     environment:
       - PYTHONUNBUFFERED=1
 
@@ -107,6 +108,7 @@ services:
     shm_size: '2gb'
     volumes:
       - .:/app
+      - ./ml_registry:/app/ml_registry
     environment:
       - PYTHONUNBUFFERED=1
 

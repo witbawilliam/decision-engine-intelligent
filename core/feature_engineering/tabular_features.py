@@ -46,7 +46,29 @@ class TabularIntelligenceEngine:
 
     def __init__(self, df: pl.DataFrame, target_column: Optional[str] = None):
         self.df = df
-        self.target_column = target_column
+        self.target_column = target_column or self._infer_target()
+
+
+
+    def _infer_target(self) -> str:
+        """
+        Logic to automatically find the target column.
+        """
+        cols = self.df.columns
+        priority_keywords = ['class', 'target', 'label', 'y', 'is_fraud', 'default']
+        for keyword in priority_keywords:
+            for col in cols:
+                if col.lower() == keyword:
+                    return col
+        
+        
+        for col in cols:
+            if self.df[col].dtype in NUMERIC_DTYPES:
+                if 2 <= self.df[col].n_unique() <= 5:
+                    return col
+
+        # Priority 3: Fallback to the last column
+        return cols[-1]    
 
 
     # FEATURE CLASSIFICATION
@@ -89,7 +111,8 @@ class TabularIntelligenceEngine:
     def _detect_problem_type(self) -> Optional[str]:
 
         if not self.target_column:
-            return None
+            self.target_column = self.df.columns[-1]
+            
 
         if self.target_column not in self.df.columns:
             return None

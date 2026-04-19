@@ -18,6 +18,7 @@ from core.drift.drift_detector import DriftDetector
 from core.contracts.problem_type import ProblemType
 from sklearn.preprocessing import LabelEncoder
 from core.models.model_registry import ModelRegistry
+from core.feature_engineering.tabular_features import TabularIntelligenceEngine
 import pandas as pd
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
@@ -88,31 +89,36 @@ class TabularPipeline(BasePipeline):
 
     
     
-
     def _detect_problem_type(self) -> None:
-        identifier = TargetIdentifier(
-            df=self.df,
-            force_target=self.target_column
+        """
+        Uses the Intelligence Engine to auto-discover the target 
+        and determine if we are doing Classification or Regression.
+        """
+        # 1. Initialize the Engine
+        # It will immediately run _infer_target() if self.target_column is None
+        engine = TabularIntelligenceEngine(
+            df=self.df, 
+            target_column=self.target_column
         )
-        detection_result = identifier.identify()
 
-        detected_type = detection_result.problem_type
+        # 2. Sync the inferred target back to the Pipeline state
+        # THIS IS THE FIX for the 'NoneType' selector error!
+        self.target_column = engine.target_column
 
+        # 3. Detect the problem type (Returns 'classification', 'regression', etc.)
+        detected_str = engine._detect_problem_type()
 
-        #Normalize external enum to platform enum
-
-        if detected_type.name in ["BINARY", "MULTICLASS", "CLASSIFICATION"]:
-
+        # 4. Map the string back to your ProblemType Enum
+        if detected_str == "classification":
             self.problem_type = ProblemType.CLASSIFICATION
-
+        elif detected_str == "regression":
+            self.problem_type = ProblemType.REGRESSION
         else:
+            # Fallback/Safety
+            self.problem_type = ProblemType.CLASSIFICATION 
 
-           self.problem_type = detected_type
-
-
-
-        logger.info(f"Detected problem type: {self.problem_type.name}")
-
+        logger.info(f"Target identified: {self.target_column}")
+        logger.info(f"Problem type locked: {self.problem_type.name}")
 
 
     def _validate(self) -> None:

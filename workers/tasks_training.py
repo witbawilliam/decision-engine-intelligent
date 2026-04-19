@@ -70,26 +70,12 @@ def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
         insight_summary=f"Successfully trained {result.model_name}"
     )
 
-    # Return as dict with internal status for Celery logic
     payload = response.model_dump()
     payload["status"] = STATUS_SUCCESS
     payload["model_name"] = result.model_name      
-    payload["artifacts_path"] = result.artifacts_path 
+    payload["artifacts_path"] = getattr(result, "artifacts_path", "models/default_path.pkl")
     return payload
 
-
-def _build_failuif_result(task_id: str, message: str) -> TaskResult:
-    """
-    Constructs a standardized error payload.
-    In a real V1 schema, you might eventually create a V1.ErrorResponse,
-    but for now, we maintain the contract.
-    """
-    return {
-        "status": STATUS_ERROR,
-        "task_id": task_id,
-        "message": message,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
 
 
 def _build_error_result(task_id: str, message: str) -> TaskResult:

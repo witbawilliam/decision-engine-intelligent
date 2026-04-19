@@ -58,11 +58,14 @@ def _load_data(dataset_path: str) -> pl.LazyFrame:
 def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
     """
     Bridges the PipelineResult to V1.JobResultResponse.
+
     """
+    version = getattr(result, "model_version", "1.0.0")
+
     response = V1.JobResultResponse(
         job_id=task_id,
         status="completed",
-        model_version=result.model_version,
+        model_version=version,
         performance=result.metrics,
         insight_summary=f"Successfully trained {result.model_name}"
     )
@@ -218,11 +221,11 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
                 )
 
                 progress.report("loading_data", percent=10)
-                lazy_df = pl.scan_parquet(local_path)  # ← parquet not csv
+                df = pl.scan_parquet(local_path).collect() 
 
                 progress.report("training_model", percent=30)
                 pipeline = TabularPipeline(
-                    dataframe=lazy_df,
+                    dataframe=df,
                     target_column=job_payload["target_column"],
                 )
                 result = pipeline.run()

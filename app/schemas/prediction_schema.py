@@ -27,7 +27,7 @@ _VERSION_RE            = re.compile(
     r"^\d+\.\d+\.\d+(-[a-zA-Z0-9]+)?$|^latest$|^staging$|^production$"
 )
 
-
+explanations: Dict[str, Any] | None = None
 
 class PipelineType(str, Enum):
     TEMPORAL    = "temporal"

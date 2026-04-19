@@ -214,8 +214,9 @@ def _build_formatter() -> logging.Formatter:
     """Return the best available JSON formatter."""
     if _JSON_LOGGER_AVAILABLE:
         formatter = JsonFormatter(
-            "%(timestamp)s %(level)s %(name)s %(service)s %(trace_id)s %(message)s",
+            "%(asctime)s %(levelname)s %(name)s %(service)s %(trace_id)s %(message)s",
             rename_fields={"levelname": "level", "asctime": "timestamp"},
+            datefmt="%Y-%m-%dT%H:%M:%S.%fZ"
         )
         return formatter
     return _EnterpriseJSONFormatter()

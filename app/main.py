@@ -46,41 +46,27 @@ from app.api.routes_upload    import router as upload_router
 from app.api.routes_jobs      import router as jobs_router
 from app.api.routes_inference import router as inference_router
 from app.api.routes_feedback  import router as feedback_router
-
+from monitoring.logging_config import get_logger, LoggingConfigurator, shutdown_logging
 
 
 settings = get_settings()
 
-logging.basicConfig(
-    level   = settings.log_level,
-    format  = "%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+LoggingConfigurator.configure(level=settings.log_level)
+
+logger = get_logger(__name__, component="api_gateway")
+
 logger = logging.getLogger("ml_platform")
 
-#  API prefix
+
 API_V1 = "/api/v1"
 
-# Internal API key header for /health/detail and /health/history
 _internal_key_header = APIKeyHeader(name="X-Internal-Key", auto_error=False)
 
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Runs ONCE on startup before the first request is accepted.
-    Runs ONCE on shutdown after the last request completes.
-
-    Startup
-    ───────
-    1. Log confirmed settings (no secrets — only names + environment)
-    2. Mark HealthChecker startup complete so /health/ready returns healthy
-       Add any warm-up logic here (e.g. load model into memory, warm Redis cache)
-
-    Shutdown
-    ────────
-    Close any resources that need graceful teardown.
-    """
+   
     
     logger.info(
         "platform_starting",
@@ -106,17 +92,18 @@ async def lifespan(app: FastAPI):
     HealthChecker.mark_startup_complete()
     logger.info("platform_ready", extra={"event": "startup_complete"})
 
-    yield   # ← app runs here, accepting requests
+    yield   
 
     
     logger.info("platform_shutdown", extra={"event": "shutdown_initiated"})
+    shutdown_logging()
 
 
 
 app = FastAPI(
     title       = settings.app_name,
     description = (
-        "Enterprise ML Platform — "
+        
         "Upload data → Train model → Predict → Feedback"
     ),
     version     = "1.0.0",
@@ -155,11 +142,7 @@ app.add_middleware(
 
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    """
-    Last-resort handler — catches anything ProductionMiddleware missed.
-    Never leaks a stack trace to the client.
-    request_id is read from request.state if ProductionMiddleware set it.
-    """
+    
     request_id = getattr(request.state, "request_id", "unknown")
     logger.error(
         "unhandled_exception",

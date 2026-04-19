@@ -55,17 +55,16 @@ def _dispatch(task_type: str, request: V1.JobCreate) -> V1.JobStatusResponse:
     try:
         celery_app.dispatch_automl_task(task_type, request.model_dump())
     except ValueError as exc:
-        logger.error("Unknown task type '%s': %s", task_type, exc)
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.error("Failed to dispatch '%s' task: %s", task_type, exc)
-        raise HTTPException(status_code=500, detail="Internal server error dispatching job")
+        PostgresClient.execute("DELETE FROM jobs WHERE id = %s", (request.idempotency_key,))
+        logger.error("Failed to dispatch task, cleaned up DB: %s", exc)
+        raise HTTPException(status_code=500, detail="Job dispatch failed")
 
     return V1.JobStatusResponse(
         job_id=request.idempotency_key,
         status="queued",
         progress=0,
         updated_at=datetime.now(timezone.utc),
+        
     )
 
 
@@ -98,12 +97,15 @@ async def get_job_status(job_id: str):
             job_id=job_id,
             status=row["status"],           
             progress=row.get("progress", 0),
-            updated_at=row.get("updated_at", datetime.now(timezone.utc)),
+            updated_at=row.get("updated_at").isoformat() if hasattr(row.get("updated_at"), "isoformat") else datetime.now(timezone.utc)
         )
 
     
     try:
         celery_result = AsyncResult(job_id, app=celery_app)
+        if celery_result.state == "PENDING" and not row:
+          raise HTTPException(status_code=404, detail="Job ID not found in system")
+        
         celery_status = _CELERY_STATE_MAP.get(celery_result.state, "queued")
 
         

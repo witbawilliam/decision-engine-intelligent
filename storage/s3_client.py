@@ -27,7 +27,7 @@ _MULTIPART_CHUNKSIZE = 50 * 1024 * 1024
 _TRANSFER_CONFIG = TransferConfig(
     multipart_threshold=_MULTIPART_THRESHOLD,
     multipart_chunksize=_MULTIPART_CHUNKSIZE,
-    max_concurrency=10,       # Parallel part uploads.
+    max_concurrency=10,       
     use_threads=True
 )
 
@@ -380,12 +380,7 @@ class S3Client:
             raise
 
     def ping(self) -> bool:
-        """
-        Health check: return ``True`` if the bucket is reachable, ``False`` otherwise.
-
-        Uses ``MaxKeys=1`` to minimise data transfer — we only care whether
-        the bucket responds, not what is in it.
-        """
+       
         try:
             self._client.list_objects_v2(Bucket=self.bucket_name, MaxKeys=1)
             return True

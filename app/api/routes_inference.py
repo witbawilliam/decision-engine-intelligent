@@ -30,11 +30,11 @@ router = APIRouter(
     tags=["Model Serving"]
 )
 
-
+_service_instance = PredictionService()
 
 def get_prediction_service() -> PredictionService:
     
-    return PredictionService()          
+    return _service_instance          
 
 
 
@@ -81,6 +81,22 @@ async def predict(
         
         svc_response = await service.predict(service_request)
 
+        sensitivity = await service.analyze_sensitivity(
+            service_request,
+            pipeline_model=...
+        )
+
+        counterfactual = await service.explain_counterfactual(
+            service_request,
+            pipeline_model=...,
+            training_data=...,
+            lever_col="your_feature",
+            target_goal=100,
+            bounds=(0, 100)
+        )
+
+        risk = service.get_risk_score(service_request)
+
         latency_ms = (time.perf_counter() - start_time) * 1000
 
         
@@ -94,6 +110,13 @@ async def predict(
             prediction    = svc_response.prediction,
             cached        = svc_response.cached,
             latency_ms    = round(latency_ms, 2),
+
+            explanations={
+                "sensitivity": sensitivity,
+                "counterfactual": counterfactual,
+                "manifold_risk": risk,
+            
+            }
         )
 
     

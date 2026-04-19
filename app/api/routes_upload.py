@@ -139,7 +139,7 @@ async def upload_dataset(
    
     merge_config = None
 
-    if len(files) == 4:
+    if len(files) == 2:
         if not left_on or not right_on:
             raise HTTPException(
                 status_code=422,
@@ -185,16 +185,30 @@ async def upload_dataset(
         dataframes = []
 
         for path in temp_paths:
-            ext = path.suffix
+                ext = path.suffix.lower()
 
-            if ext == ".csv":
-                df = pl.read_csv(path)
-            elif ext == ".parquet":
-                df = pl.read_parquet(path)
-            else:
-                df = pl.read_excel(path, engine="fastexcel")
+                if ext == ".csv":
+                    
+                    df = pl.read_csv(
+                        path, 
+                        infer_schema_length=10000,
+                        try_parse_dates=True,
+                        schema_overrides={"Time": pl.Float64},
+                        
+                        null_values=["", "NA", "null", "N/A"],
+                        ignore_errors=False
+                    )
+                elif ext == ".parquet":
+                    df = pl.read_parquet(path)
+                else:
+                
+                    df = pl.read_excel(path, engine="fastexcel")
 
-            dataframes.append(df)
+                dataframes.append(df)
+
+                
+
+            
 
         
         if len(dataframes) == 2:

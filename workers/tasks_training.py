@@ -38,13 +38,21 @@ class TaskProgressReporter:
     task_id: str
 
     def report(self, step: str, percent: int) -> None:
+
+        payload = V1.JobStatusResponse(
+            job_id=self.task_id,
+            status="running",
+            progress=percent,
+            updated_at=datetime.now(timezone.utc)
+        )
+
         self.task.update_state(
             state="PROGRESS",
-            meta={"step": step, "percent": percent, "task_id": self.task_id},
+            meta=payload.model_dump
         )
         logger.debug(
-            "Task progress",
-            extra={"task_id": self.task_id, "step": step, "percent": percent},
+            "Task progress reported",
+            extra=payload.model_dump(),
         )
 
 
@@ -60,12 +68,18 @@ def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
     Bridges the PipelineResult to V1.JobResultResponse.
 
     """
-    version = getattr(result, "model_version", "1.0.0")
+    version = getattr(result, "model_version", "1")
+
+    if "." not in str(version):
+        semver_version = f"{version}.0.0" 
+    else:
+        semver_version = str(version)
+
 
     response = V1.JobResultResponse(
         job_id=task_id,
         status="completed",
-        model_version=version,
+        model_version=semver_version,
         performance=result.metrics,
         insight_summary=f"Successfully trained {result.model_name}"
     )
@@ -91,6 +105,17 @@ def _build_error_result(task_id: str, message: str) -> TaskResult:
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+def _build_s3_client() -> S3Client:
+
+    return S3Client(
+
+        bucket_name=os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
+        endpoint_url=os.getenv("S3__ENDPOINT_URL"),
+        access_key=os.getenv("AWS_ACCESS_KEY_ID"),
+        secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        region=os.getenv("AWS_REGION", "us-east-1"),
+
+    )
 
 
 @dataclass
@@ -191,13 +216,7 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
     with RequestContext(trace_id=task_id):
         try:
             
-            s3 = S3Client(
-                bucket_name=os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
-                endpoint_url=os.getenv("S3__ENDPOINT_URL"),
-                access_key=os.getenv("AWS_ACCESS_KEY_ID"),
-                secret_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region=os.getenv("AWS_REGION", "us-east-1"),
-            )
+            s3 = _build_s3_client()
 
             with tempfile.TemporaryDirectory() as tmp_dir:
                 local_path = os.path.join(tmp_dir, "dataset.parquet")
@@ -211,10 +230,17 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
 
                 progress.report("training_model", percent=30)
                 pipeline = TabularPipeline(
-                    dataframe=df,
+                    df=df,
                     target_column=job_payload["target_column"],
+                    s3_client=s3
                 )
-                result = pipeline.run()
+
+                model_name = job_payload.get("model_name") or job_id
+                result = pipeline.execute_pipeline(model_name=model_name)
+
+                
+
+
 
             progress.report("finalising", percent=90)
 
@@ -251,51 +277,71 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
     max_retries=3,
     retry_backoff=True,
 )
-def train_temporal_task(
-    self,
-    dataset_path: str,
-    target_column: str,
-    datetime_column: str,  # Extra arg required for Temporal
-    config_dict: Optional[Dict[str, Any]] = None,
-) -> TaskResult:
-    """
-    Train a forecasting model (Prophet) on temporal data.
-    """
-    task_id: str = self.request.id
-    progress = TaskProgressReporter(task=self, task_id=task_id)
+def train_temporal_task(self, job_payload: dict) -> TaskResult:
+    task_id = self.request.id
+    job_id  = job_payload.get("idempotency_key") or task_id
+    progress = TaskProgressReporter(task=self, task_id=job_id)
 
-    logger.info(
-        "Temporal training job started",
-        extra={
-            "task_id": task_id, 
-            "dataset_path": dataset_path, 
-            "datetime_column": datetime_column
-        },
+    PostgresClient.upsert(
+        table="jobs",
+        data={"id": job_id, "status": "running", "progress": 0,
+              "updated_at": datetime.now(timezone.utc)},
+        conflict_columns=["id"],
     )
 
-    try:
-    
-        progress.report("loading_data", percent=10)
-        df = _load_data(dataset_path).collect() 
+    with RequestContext(trace_id=task_id):
+        try:
+            s3 = _build_s3_client()  
 
-        
-        config = TemporalPipelineConfig(**(config_dict or {}))
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                local_path = os.path.join(tmp_dir, "temporal_dataset.parquet")
+                s3.download_file(
+                    object_name=job_payload["s3_key"],
+                    local_path=local_path,
+                )
+                progress.report("loading_data", percent=10)
+                df = pl.scan_parquet(local_path).collect()
 
-        progress.report("feature_engineering", percent=30)
-        pipeline = TemporalPipeline(
-            dataframe=df,
-            target_column=target_column,
-            datetime_column=datetime_column,
-            experiment_id=task_id,
-            config=config
-        )
+                time_col   = job_payload.get("time_column") or job_payload.get("datetime_column")
+                target_col = job_payload.get("target_column")
 
-        progress.report("training_model", percent=60)
-        result = pipeline.run() 
+                if not time_col:
+                    raise ValueError(f"Missing time_column. Got keys: {list(job_payload.keys())}")
+                if not target_col:
+                    raise ValueError(f"Missing target_column. Got keys: {list(job_payload.keys())}")
 
-        progress.report("finalising", percent=90)
-        return _build_success_result(task_id, result)
+                config = TemporalPipelineConfig(
+                    forecast_horizon=job_payload.get("forecast_horizon", 30)
+                )
+                progress.report("feature_engineering", percent=30)
 
-    except Exception as e:
-        logger.exception("Temporal pipeline failed", extra={"task_id": task_id})
-        return _build_error_result(task_id, str(e))
+                pipeline = TemporalPipeline(
+                    dataframe=df,
+                    target_column=target_col,
+                    datetime_column=time_col,
+                    experiment_id=job_id,
+                    config=config,
+                    s3_client=s3
+                )
+                progress.report("training_model", percent=60)
+                result = pipeline.run()
+                progress.report("finalising", percent=90)
+
+            PostgresClient.upsert(
+                table="jobs",
+                data={"id": job_id, "status": "completed", "progress": 100,
+                      "updated_at": datetime.now(timezone.utc)},
+                conflict_columns=["id"],
+            )
+            return _build_success_result(job_id, result)
+
+        except Exception as e:
+            PostgresClient.upsert(
+                table="jobs",
+                data={"id": job_id, "status": "failed", "progress": 0,
+                      "updated_at": datetime.now(timezone.utc),
+                      "failure_reason": str(e)},
+                conflict_columns=["id"],
+            )
+            logger.exception("Temporal pipeline failed", extra={"job_id": job_id})
+            return _build_error_result(job_id, str(e))

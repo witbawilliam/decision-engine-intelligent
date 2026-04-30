@@ -32,20 +32,7 @@ _TRANSFER_CONFIG = TransferConfig(
 )
 
 class S3Client:
-    """
-    Thin, opinionated wrapper around ``boto3.client("s3")``.
-
-    Design decisions
-    ----------------
-    * One instance per bucket — keeps the API simple and ensures all
-      operations target the same bucket without repeating the name.
-    * Connection pooling via ``max_pool_connections`` — critical when many
-      Celery workers share the same Python process (prefork copies the pool).
-    * Multipart uploads for large files — boto3's default threshold is 8 MiB;
-      we raise it to 100 MiB to reduce part-count overhead for model artefacts.
-    * Structured logging throughout — no f-strings in ``extra=`` fields.
-    * ``_ensure_bucket`` is dev/MinIO only; production buckets are Terraform-managed.
-    """
+    
 
     def __init__(
         self,
@@ -84,13 +71,8 @@ class S3Client:
     
 
     def _ensure_bucket(self) -> None:
-        """
-        Verify bucket existence or create it in non-production environments
-        (local development, MinIO, CI).
-
-        Production buckets are managed by Terraform/CDK — this method is
-        intentionally a no-op there to avoid accidental creation.
-        """
+        
+       
         try:
             self._client.head_bucket(Bucket=self.bucket_name)
             logger.debug("Bucket exists", extra={"bucket": self.bucket_name})
@@ -126,25 +108,7 @@ class S3Client:
         metadata: Optional[dict[str, str]] = None,
         content_type: Optional[str] = None,
     ) -> str:
-        """
-        Upload a local file to S3 with optional metadata and content-type.
-
-        Files > 100 MiB are uploaded using multipart transfers automatically
-        via ``TransferConfig``.
-
-        Parameters
-        ----------
-        local_path:   Path to the local file.
-        object_name:  Destination key in the bucket.
-        metadata:     Key/value strings stored alongside the object
-                      (e.g. model version, job ID). Must be strings only.
-        content_type: MIME type (e.g. ``"application/octet-stream"``).
-                      Defaults to boto3's auto-detection.
-
-        Returns
-        -------
-        The ``object_name`` key, allowing callers to chain: ``uri = client.upload_file(...)``.
-        """
+       
         extra_args: dict[str, Any] = {}
         if metadata is not None:
             extra_args["Metadata"] = metadata
@@ -176,19 +140,7 @@ class S3Client:
             raise
 
     def download_file(self, object_name: str, local_path: str | Path) -> Path:
-        """
-        Download an S3 object to a local path.
-
-        Parameters
-        ----------
-        object_name:  Source key in the bucket.
-        local_path:   Destination on the local filesystem.
-                      Parent directories are created if they do not exist.
-
-        Returns
-        -------
-        ``Path`` to the downloaded file.
-        """
+        
         destination = Path(local_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
 
@@ -216,13 +168,7 @@ class S3Client:
             raise
 
     def delete_object(self, object_name: str) -> None:
-        """
-        Permanently delete an object from the bucket.
-
-        S3's ``delete_object`` is idempotent — deleting a key that does not
-        exist returns HTTP 204 with no error, so this method never raises for
-        missing keys.
-        """
+       
         try:
             self._client.delete_object(Bucket=self.bucket_name, Key=object_name)
             logger.info(
@@ -241,22 +187,7 @@ class S3Client:
             raise
 
     def list_objects(self, prefix: str = "") -> list[str]:
-        """
-        Return all object keys under *prefix* using a paginator.
-
-        The paginator handles S3's 1,000-key-per-page limit automatically.
-        Only ``NoSuchBucket`` is silently treated as an empty list; all other
-        errors (access denied, network failure) are re-raised so callers are
-        not silently misled by an empty result.
-
-        Parameters
-        ----------
-        prefix: Key prefix to filter results (e.g. ``"models/forecasting/"``).
-
-        Returns
-        -------
-        Sorted list of matching keys.
-        """
+        
         paginator = self._client.get_paginator("list_objects_v2")
         keys: list[str] = []
 
@@ -279,17 +210,7 @@ class S3Client:
             raise
 
     def get_object_metadata(self, object_name: str) -> dict[str, str]:
-        """
-        Return the user-defined metadata dict for *object_name*.
-
-        Returns ``{}`` only when the object does not exist (404).
-        All other errors (403 access denied, 5xx, network) are re-raised —
-        a permission error and a missing key are not the same problem.
-
-        Returns
-        -------
-        Dict of string metadata values, or ``{}`` if the key does not exist.
-        """
+       
         try:
             response = self._client.head_object(Bucket=self.bucket_name, Key=object_name)
             return response.get("Metadata", {})
@@ -313,23 +234,7 @@ class S3Client:
         expiration: int = 3600,
         http_method: str = "GET",
     ) -> str:
-        """
-        Generate a time-limited presigned URL for direct client access.
-
-        The URL lets a browser or external service download (or upload) the
-        object directly from S3, bypassing your API server — useful for
-        large model artefacts and dataset exports.
-
-        Parameters
-        ----------
-        object_name:  Key of the object in the bucket.
-        expiration:   URL validity in seconds (default: 1 hour, max: 7 days).
-        http_method:  ``"GET"`` for download, ``"PUT"`` for direct client upload.
-
-        Returns
-        -------
-        Presigned URL string.
-        """
+        
         operation = "get_object" if http_method.upper() == "GET" else "put_object"
 
         try:
@@ -360,12 +265,7 @@ class S3Client:
             raise
 
     def object_exists(self, object_name: str) -> bool:
-        """
-        Return ``True`` if *object_name* exists in the bucket, ``False`` if not.
-
-        Uses ``head_object`` — cheaper than ``get_object`` since no body is
-        transferred. Raises for non-404 errors (access denied, etc.).
-        """
+        
         try:
             self._client.head_object(Bucket=self.bucket_name, Key=object_name)
             return True

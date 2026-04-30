@@ -117,6 +117,8 @@ class TemporalPipeline(BasePipeline):
         self._feature_engineering()
         self._split()
         self._train()
+        self.model = None
+        self.registry = {}
         
         metrics = self._evaluate_final()
         
@@ -134,10 +136,12 @@ class TemporalPipeline(BasePipeline):
         self,
         dataframe:       pl.DataFrame,
         target_column:   str,
-        datetime_column: str,                            # Required for forecasting
+        s3_client: Any,
+        datetime_column: str,                            
         experiment_id:   str = "temporal_exp",
         config:          Optional[TemporalPipelineConfig] = None,
-        reference_df:    Optional[pl.DataFrame] = None, # Optional: for drift detection
+        reference_df:    Optional[pl.DataFrame] = None, 
+        
     ):
         super().__init__(
             dataframe       = dataframe,
@@ -159,6 +163,11 @@ class TemporalPipeline(BasePipeline):
         self._backtest_summary: Dict[str, Any] = {}
         self._drift_report: Any = None
         self._registry_metadata: Dict[str, Any] = {}
+        
+        self._registry = ModelRegistry(
+        base_path=self.config.registry_path,
+        s3_client=s3_client  
+        )
 
         # Sub-system instances 
         self._circuit_breaker = CircuitBreaker(

@@ -87,6 +87,8 @@ class V1:
         problem_type: Optional[ProblemType] = None
         s3_key: Optional[str] = None            # ← S3 path to the uploaded dataset
         reference_s3_key: Optional[str] = None
+        time_column: Optional[str] = None
+        forecast_horizon: Optional[int] = 30
 
     class JobStatusResponse(BaseModel):
         """Used for training updates"""
@@ -104,16 +106,6 @@ class V1:
         insight_summary: Optional[str] = None
 
     
-
-    class FeedbackResponse(BaseModel):
-        status: str = "success"
-        message: str
-    
-
-    @staticmethod
-    def validate_filename(v: str) -> str:
-        
-        pass
 
     class FeedbackRequest(BaseModel):
         model_name: str

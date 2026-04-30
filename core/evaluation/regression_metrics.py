@@ -44,8 +44,10 @@ class RegressionMetrics:
         y_true = np.asarray(y_true).ravel()
         y_pred = np.asarray(y_pred).ravel()
 
-        if y_true.size == 0:
-            raise ValueError("Input arrays cannot be empty.")
+        if np.any(np.isnan(y_true)) or np.any(np.isnan(y_pred)):
+         raise ValueError("Input arrays contain NaN values. Clean your data before evaluation.")
+        if np.any(np.isinf(y_true)) or np.any(np.isinf(y_pred)):
+          raise ValueError("Input arrays contain Inf values.")
         if y_true.shape != y_pred.shape:
             raise ValueError(f"Shape mismatch: y_true {y_true.shape} != y_pred {y_pred.shape}")
 
@@ -55,7 +57,7 @@ class RegressionMetrics:
         
         mae = float(np.mean(abs_errors))
         mse = float(np.mean(errors ** 2))
-        rmse = np.sqrt(mse)
+        rmse = float(np.sqrt(mse))
         median_abs = float(np.median(abs_errors))
         max_err = float(np.max(abs_errors))
 
@@ -88,10 +90,11 @@ class RegressionMetrics:
         ss_res = np.sum((y_true - y_pred) ** 2)
         ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
         
-        if ss_tot < self.epsilon:
-            logger.warning("R2 undefined: Target variable has zero variance.")
-            return None
-        return float(1 - (ss_res / ss_tot))
+        
+        if np.var(y_true) < self.epsilon:
+          logger.warning("R2 undefined: Target variable has zero variance.")
+          return None
+        return float(1 - (ss_res / y_true))
 
     def _adjusted_r2(self, r2: Optional[float], n: int, p: Optional[int]) -> Optional[float]:
         """Adjusts R2 for the number of predictors to prevent overfitting artifacts."""
@@ -104,15 +107,33 @@ class RegressionMetrics:
 
     def _mape(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
         """Vectorized MAPE with divide-by-zero protection."""
+        # Step 1: define mask first
         mask = np.abs(y_true) > self.epsilon
+
+        # Step 2: count EXCLUDED samples (where mask is False)
+        n_excluded = int(np.sum(~mask))
+        if n_excluded > 0:
+            logger.warning(
+                f"MAPE: {n_excluded}/{len(y_true)} samples excluded "
+                "due to near-zero y_true values. Result may be unreliable."
+            )
+
+        # Step 3: if nothing survives the mask, MAPE is undefined
         if not np.any(mask):
             return None
+
         return float(np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100)
+
+    
 
     def _msle(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
         """Mean Squared Logarithmic Error: Useful for targets with exponential growth."""
-        if np.any(y_true < 0) or np.any(y_pred < 0):
-            return None # MSLE is undefined for negative values
+                # Fix
+        if np.any(y_true < 0):
+            return None  # Truly undefined if ground truth is negative
+        if np.any(y_pred < 0):
+            logger.warning("MSLE: Negative predictions clamped to 0.")
+            y_pred = np.maximum(y_pred, 0)
         return float(np.mean((np.log1p(y_true) - np.log1p(y_pred)) ** 2))
 
     def _explained_variance(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:

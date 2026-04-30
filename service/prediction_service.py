@@ -23,6 +23,7 @@ from core.decision_engine.sensitivity_analysis import SensitivityAnalyzer, Sensi
 from core.decision_engine.counterfactuals import CounterfactualOrchestrator, CounterfactualResult
 from core.decision_engine.manifold_guard import ManifoldGuard
 
+
 logger = get_logger(__name__, component="inference_engine")
 
 
@@ -82,26 +83,7 @@ class PredictionResponse:
 
 
 class PredictionService:
-    """
-    Stateless prediction orchestration service.
-
-    Dependency Injection
     
-    All collaborators are passed in at construction time so every external
-    dependency can be mocked without patching module globals:
-
-        service = PredictionService(
-            temporal_pipeline=mock_pipeline,
-            redis=mock_redis,
-            pg=mock_pg,
-        )
-
-    Statelessness
-    
-    No prediction data is stored on `self`. All per-request state lives in
-    RedisClient (cache entries, in-flight locks, counters). The service is
-    safe to instantiate in multiple Celery workers simultaneously.
-    """
 
     def __init__(
         self,

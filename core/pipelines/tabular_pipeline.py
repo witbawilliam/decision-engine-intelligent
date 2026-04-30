@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import Dict, Any
+import numpy as np
 
 import polars as pl
 
@@ -10,7 +11,6 @@ from core.contracts.schema_inference import SchemaInference
 from core.contracts.schema_validator import SchemaValidator
 from core.feature_engineering.data_quality import DataQualityAnalyzer
 from core.feature_engineering.preprocessing_utils import FeatureProcessor
-from core.labeling.target_identifier import TargetIdentifier
 from core.models.xgboost_model import XGBoostModel
 from core.evaluation.regression_metrics import RegressionMetrics
 from core.evaluation.feature_importance import XGBExplainer
@@ -24,6 +24,7 @@ from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
 from sklearn.metrics import accuracy_score, f1_score, precision_score
 from sklearn.model_selection import train_test_split
+from storage.s3_client import S3Client
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,11 @@ class PipelineResult:
 
 
 class TabularPipeline(BasePipeline):
-    """
-    Enterprise-Grade Tabular ML Pipeline
-    Fully modular, contract-driven, and production-aligned.
-    """
+
+    def __init__(self, df: pl.DataFrame, target_column: str, s3_client: S3Client, **kwargs):
+        super().__init__(df, target_column, **kwargs)
+        self.s3_client = s3_client  # Store the client
+    
 
     def execute_pipeline(self, model_name: str) -> PipelineResult:
         """
@@ -60,7 +62,8 @@ class TabularPipeline(BasePipeline):
             self._train()
             
             # Evaluation
-            final_metrics = self._evaluate_final()
+            self._cached_metrics = self._evaluate_final()
+            self._cached_drift = self._check_drift()
             
             # Persistence
             # Assuming your save_to_registry returns the registration info
@@ -71,12 +74,12 @@ class TabularPipeline(BasePipeline):
                 status="SUCCESS",
                 model_name=model_name,
                 model_version=str(registration.get("version", "unknown")),
-                metrics=final_metrics,
+                metrics=self._cached_metrics,
                 artifacts_path=registration.get("path", ""),
                 feature_columns=self.feature_columns,
                 metadata={
                     "problem_type": self.problem_type.name,
-                    "is_drifted": self._check_drift()["is_drifted"]
+                    "is_drifted": self._cached_drift["is_drifted"]
                 }
             )
             
@@ -94,27 +97,27 @@ class TabularPipeline(BasePipeline):
         Uses the Intelligence Engine to auto-discover the target 
         and determine if we are doing Classification or Regression.
         """
-        # 1. Initialize the Engine
-        # It will immediately run _infer_target() if self.target_column is None
+        
         engine = TabularIntelligenceEngine(
             df=self.df, 
             target_column=self.target_column
         )
 
-        # 2. Sync the inferred target back to the Pipeline state
-        # THIS IS THE FIX for the 'NoneType' selector error!
         self.target_column = engine.target_column
 
-        # 3. Detect the problem type (Returns 'classification', 'regression', etc.)
         detected_str = engine._detect_problem_type()
 
-        # 4. Map the string back to your ProblemType Enum
         if detected_str == "classification":
             self.problem_type = ProblemType.CLASSIFICATION
         elif detected_str == "regression":
             self.problem_type = ProblemType.REGRESSION
         else:
-            # Fallback/Safety
+            
+            logger.warning(
+                f"Unknown problem type '{detected_str}' returned by engine. "
+                "Defaulting to CLASSIFICATION — verify this is correct."
+            )
+
             self.problem_type = ProblemType.CLASSIFICATION 
 
         logger.info(f"Target identified: {self.target_column}")
@@ -165,11 +168,11 @@ class TabularPipeline(BasePipeline):
         Returns processed dataframe + metadata.
         """
 
-        processor = FeatureProcessor(
+        self.processor = FeatureProcessor(
             target_column=self.target_column
         )
+        processed_df, metadata = self.processor.process(self.df)
 
-        processed_df, metadata = processor.process(self.df)
 
         self.df = processed_df
         self.preprocessing_metadata = metadata
@@ -200,12 +203,17 @@ class TabularPipeline(BasePipeline):
         X = self.df.drop(self.target_column).to_pandas()
         y = self.df[self.target_column].to_pandas()
 
+        use_stratify = (
+            self.problem_type == ProblemType.CLASSIFICATION
+            and y.nunique() <= 50
+        )
+
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             X,
             y,
             test_size=0.2,
             random_state=42,
-            stratify=y if self.problem_type == ProblemType.CLASSIFICATION else None,
+            stratify=y if use_stratify else None
         )
 
         
@@ -224,6 +232,8 @@ class TabularPipeline(BasePipeline):
         if self.problem_type == ProblemType.CLASSIFICATION:
             self.label_encoder = LabelEncoder()
             y_train = self.label_encoder.fit_transform(self.y_train)
+        else: 
+            self.label_encoder = None
 
         train_df = pl.from_pandas(self.X_train)
         train_df = train_df.with_columns(
@@ -241,6 +251,7 @@ class TabularPipeline(BasePipeline):
     
 
     def _evaluate_final(self) -> Dict[str, float]:
+        assert hasattr(self, "model"), "_train() must be called before _evaluate_final()"
         test_df = pl.from_pandas(self.X_test)
         test_df = test_df.with_columns(
             pl.Series(self.target_column, self.y_test)
@@ -264,10 +275,13 @@ class TabularPipeline(BasePipeline):
         
         if self.problem_type == ProblemType.CLASSIFICATION:
 
-            # Ensure y_true matches the format of predictions
-            y_true = self.y_test
-            if hasattr(self, 'label_encoder'):
-                y_true = self.label_encoder.transform(self.y_test)
+            
+            y_true = (
+
+                self.label_encoder.transform(self.y_test)
+                if self.label_encoder is not None
+                else self.y_test
+            )
 
             metrics = {
                 "accuracy": float(accuracy_score(y_true, predictions)),
@@ -277,30 +291,40 @@ class TabularPipeline(BasePipeline):
             logger.info(f"Classification Metrics: {metrics}")
             return metrics
     
-        return {}
+        raise NotImplementedError(
+            f"Metric evaluation not implemented for problem type: {self.problem_type}"
+        )
     
-
 
     def predict(self, data: Any) -> Any:
         """
         High-level inference entry point.
-        Resolves the 'AttributeError: DataFrame object has no attribute select'.
+ 
+        Uses the FITTED FeatureProcessor from training (self.feature_processor)
+        to guarantee that all transformations are applied with the exact same
+        statistics computed during training — eliminating training-serving skew.
         """
-        # Ensure input data is converted to Polars if it arrives as Pandas/Dict
-        if not isinstance(data, pl.DataFrame):
-            # This check prevents the 'no attribute select' error in the inference test
-            inference_df = pl.DataFrame(data) if not isinstance(data, pd.DataFrame) else pl.from_pandas(data)
-        else:
+        assert hasattr(self, "processor"), (
+            "Pipeline has not been trained. Call execute_pipeline() first."
+        )
+        assert hasattr(self, "model"), (
+            "Pipeline has not been trained. Call execute_pipeline() first."
+        )
+ 
+        # Normalise input to Polars
+        if isinstance(data, pl.DataFrame):
             inference_df = data
-
-        # If your FeatureProcessor logic is required for raw data at inference:
-        # Note: You should typically save the processor or logic for production
-        processed_inference_df, _ = FeatureProcessor(
-            target_column=self.target_column
-        ).process(inference_df)
-
-        return self.model.predict(processed_inference_df.drop(self.target_column, strict=False))
+        elif isinstance(data, pd.DataFrame):
+            inference_df = pl.from_pandas(data)
+        elif isinstance(data, dict):
+            inference_df = pl.DataFrame(data)
+        else:
+            raise TypeError(f"predict() expects a DataFrame or dict, got {type(data)}")
+ 
         
+        processed_df, _ = self.processor.process(inference_df)
+ 
+        return self.model.predict(processed_df.drop(self.target_column, strict=False))
     
     
     def _post_training_analysis(self) -> Dict[str, Any]:
@@ -309,8 +333,7 @@ class TabularPipeline(BasePipeline):
             feature_names=self.feature_columns
         )
 
-        # Replace compute() with the actual method defined inside XGBExplainer
-        importance_report = analyzer.explain(self.X_train)
+        importance_report = analyzer.explain(pl.from_pandas(self.X_train))
 
         return importance_report
         
@@ -335,6 +358,8 @@ class TabularPipeline(BasePipeline):
     def _collect_artifacts(self) -> Dict[str, Any]:
         return {
             "model": self.model,
+            "label_encoder": self.label_encoder,          
+            "feature_processor": self.processor,
             "problem_type": self.problem_type.name,
             "feature_importance": self._post_training_analysis(),
             "drift_report": self._check_drift(),
@@ -348,18 +373,28 @@ class TabularPipeline(BasePipeline):
         """
         Connects the Pipeline results to the Model Registry.
         """
-        # 1. Initialize Registry
-        registry = ModelRegistry(base_path=registry_path)
+
+        if not self.s3_client:
+            raise ValueError("Pipeline initialized without an S3Client. Cannot register model.")
         
-        # 2. Collect artifacts and metrics
+        registry = ModelRegistry(base_path=registry_path, s3_client=self.s3_client)
+        
+        # Collect artifacts and metrics
         artifacts = self._collect_artifacts()
-        final_metrics = self._evaluate_final()
+    
+        raw_params = self.model.model.get_params() if hasattr(self.model.model, 'get_params') else {}
+
+    
+        sanitized_params = {
+            k: (None if isinstance(v, float) and np.isnan(v) else v) 
+            for k, v in raw_params.items()
+        }
         
         
         registration_result = registry.register(
             model=self.model,
             model_name=model_name,
-            metrics=final_metrics,
+            metrics=self._cached_metrics,
             parameters=self.model.model.get_params() if hasattr(self.model.model, 'get_params') else {},
             problem_type=self.problem_type.name,
             stage="staging"

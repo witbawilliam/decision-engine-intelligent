@@ -62,12 +62,7 @@ class RedisClient:
 
     @classmethod
     def _get_client(cls) -> redis.Redis:
-        """
-        Return the shared Redis client, creating it on first call.
-
-        Double-checked locking prevents two threads from both seeing
-        ``_client is None`` and both calling ``_create_client()``.
-        """
+       
         if cls._client is None:
             with cls._lock:
                 if cls._client is None:
@@ -84,13 +79,7 @@ class RedisClient:
 
     @staticmethod
     def _deserialise(raw: str, key: str) -> Any:
-        """
-        Deserialise a JSON string back to a Python object.
-
-        If the stored value is not valid JSON (e.g. was written by another
-        client that doesn't use JSON), log a warning and return the raw string
-        rather than raising — this is the least-surprise behaviour for a cache.
-        """
+       
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
@@ -135,11 +124,7 @@ class RedisClient:
 
     @classmethod
     def get(cls, key: str) -> Optional[Any]:
-        """
-        Retrieve and deserialise the value stored at *key*.
-
-        Returns ``None`` if the key does not exist.
-        """
+        
         raw: Optional[str] = cls._get_client().get(key)
         if raw is None:
             return None
@@ -147,11 +132,7 @@ class RedisClient:
 
     @classmethod
     def delete(cls, *keys: str) -> int:
-        """
-        Delete one or more keys.
-
-        Returns the number of keys that were actually deleted.
-        """
+        
         if not keys:
             return 0
         return cls._get_client().delete(*keys)
@@ -163,37 +144,20 @@ class RedisClient:
 
     @classmethod
     def set_ttl(cls, key: str, ttl: int) -> bool:
-        """
-        Set or update the TTL on an existing key.
-
-        Returns ``True`` if the timeout was set, ``False`` if the key does
-        not exist.
-        """
+        
         if ttl <= 0:
             raise ValueError(f"ttl must be a positive integer, got {ttl!r}")
         return cls._get_client().expire(key, ttl)
 
     @classmethod
     def increment(cls, key: str, amount: int = 1) -> int:
-        """
-        Atomically increment the integer stored at *key* by *amount*.
-
-        If the key does not exist it is initialised to ``0`` before
-        incrementing.
-
-        Returns the new value.
-        """
+       
         return cls._get_client().incr(key, amount)
 
     
     @classmethod
     def push_queue(cls, queue_name: str, payload: Any) -> None:
-        """
-        Append *payload* (serialised as JSON) to the tail of *queue_name*.
-
-        Queue keys are stored as ``queue:<queue_name>`` to avoid collisions
-        with plain string keys.
-        """
+       
         cls._get_client().rpush(
             f"{_QUEUE_PREFIX}{queue_name}",
             cls._serialise(payload),
@@ -201,9 +165,7 @@ class RedisClient:
 
     @classmethod
     def pop_queue(cls, queue_name: str, timeout: int = 0) -> Optional[Any]:
-        """
-        Remove and return the head item from *queue_name*.
-        """
+        
         full_key = f"{_QUEUE_PREFIX}{queue_name}"
 
         if timeout > 0:
@@ -232,12 +194,7 @@ class RedisClient:
         timeout: float = 10.0,
         blocking_timeout: Optional[float] = 5.0,
     ) -> Generator[None, None, None]:
-        """
-        Acquire a Redis-backed distributed lock for *name*.
-
-        Essential for preventing duplicate ML jobs when multiple Celery
-        workers race to process the same task (e.g. idempotency-key checks)
-        """
+       
         acquired_lock = cls._get_client().lock(
             name,
             timeout=timeout,
@@ -265,14 +222,7 @@ class RedisClient:
     @classmethod
     @contextmanager
     def pipeline(cls, transaction: bool = True) -> Generator[redis.client.Pipeline, None, None]:
-        """
-        Context manager that yields a Redis pipeline for batch operations.
-
-        Batching multiple commands in a single round-trip is significantly
-        faster than issuing them one by one — critical for writing many
-        metrics or cache entries at once.
-        
-        """
+       
         pipe = cls._get_client().pipeline(transaction=transaction)
         try:
             yield pipe

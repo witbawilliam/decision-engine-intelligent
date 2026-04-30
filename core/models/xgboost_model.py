@@ -67,6 +67,7 @@ class XGBoostModel:
         self.params = params or {}
         self.feature_names: Optional[list[str]] = None
         self._is_fitted = False
+        self._n_classes: Optional[int] = None
         self.model = self._initialize_model()
         
 
@@ -122,6 +123,24 @@ class XGBoostModel:
         for col in X_pd.select_dtypes(["object", "category"]).columns:
             X_pd[col] = X_pd[col].astype("category")
 
+        y_np = y.to_numpy() 
+
+        if self.problem_type == ProblemType.CLASSIFICATION:
+            self._n_classes = len(np.unique(y_np))
+            if self._n_classes > 2:
+                logger.info(
+                    f"Multiclass problem detected ({self._n_classes} classes). "
+                    "Switching objective to 'multi:softprob'."
+                )
+                self.model.set_params(
+                    objective="multi:softprob",
+                    eval_metric="mlogloss",
+                    num_class=self._n_classes,
+                )
+            else:
+                self._n_classes = 2
+                logger.info("Binary classification confirmed.")   
+
         start_time = time.perf_counter()
         self.model.fit(X_pd, y.to_numpy())
         duration = time.perf_counter() - start_time
@@ -173,8 +192,17 @@ class XGBoostModel:
         if not self._is_fitted or self.feature_names is None:
             return {}
         
-        importances = self.model.feature_importances_
-        return dict(zip(self.feature_names, map(float, importances)))
+
+        booster = self.model.get_booster()
+        gain_scores = booster.get_score(importance_type="gain")
+        
+        importance = {}
+        for i, name in enumerate(self.feature_names):
+            # XGBoost internally uses 'f0', 'f1', ... when feature names are not
+            # registered. Fall back gracefully.
+            val = gain_scores.get(name) or gain_scores.get(f"f{i}", 0.0)
+            importance[name] = float(val)
+        return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
     
 
     

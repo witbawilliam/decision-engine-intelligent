@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 
 from storage.postgres_client import PostgresClient
 from storage.s3_client import S3Client
+import math
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -31,33 +33,13 @@ CREATE TABLE IF NOT EXISTS model_registry (
 
 
 class ModelRegistry:
-    """
-    ML model registry backed by S3 (artifacts) and PostgreSQL (metadata).
-
-    Artifact storage
-    
-    Model pickles are written to S3 under the key pattern::
-
-        {s3_prefix}/{model_name}/v{version}/model.pkl
-
-    Metadata storage
-    
-    Every registered version is a row in the ``model_registry`` table.
-    The table is created automatically on first instantiation (idempotent).
-
-    Parameters
-
-    s3_client:   A configured :class:`S3Client` instance.
-    s3_prefix:   Key prefix inside the bucket (default: ``"ml_registry"``).
-    """
+   
 
     def __init__(
         self,
         s3_client: Optional[S3Client] = None,
         s3_prefix: str = "ml_registry",
-        # Legacy parameter kept for backward compatibility — previously this
-        # class stored artifacts on local disk under base_path.  It is now
-        # silently ignored; storage is handled by S3 + PostgreSQL.
+        
         base_path: str = "ml_registry",
     ) -> None:
         if s3_client is None:
@@ -68,7 +50,18 @@ class ModelRegistry:
         self._s3 = s3_client
         self._s3_prefix = s3_prefix.rstrip("/")
         self._ensure_table()
-
+    
+    def _sanitize(self, obj: Any) -> Any:
+        """
+        Recursively replace NaN or Infinity with None for JSON compliance.
+        """
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: self._sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._sanitize(x) for x in obj]
+        return obj
     
 
     def register(
@@ -86,7 +79,8 @@ class ModelRegistry:
         Returns
         The metadata dict for the new version (mirrors the DB row).
         """
-        import json
+        clean_metrics = self._sanitize(metrics)
+        clean_parameters = self._sanitize(parameters)
 
         version = self._next_version(model_name)
         artifact_key = self._artifact_key(model_name, version)
@@ -124,8 +118,8 @@ class ModelRegistry:
                 version,
                 stage,
                 problem_type,
-                json.dumps(metrics),
-                json.dumps(parameters),
+                json.dumps(clean_metrics),
+                json.dumps(clean_parameters),
                 artifact_key,
                 datetime.utcnow(),
             ),

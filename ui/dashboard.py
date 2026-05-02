@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from urllib.parse import quote
 
 API_BASE_URL = "http://api:8000"
 
@@ -88,6 +89,7 @@ def load_preview(file, nrows: int = 500) -> pd.DataFrame | None:
         return None
 
 
+
 def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
     payload = {
         "idempotency_key": st.session_state["job_id"],
@@ -107,16 +109,10 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
         return
 
     response_data = train_res.json()
-
-    # job_id = idempotency_key = S3 path (e.g. "datasets/user/.../file.parquet")
-    # The path contains "/" which the FastAPI router splits into extra segments,
-    # causing /v1/train/status/{job_id} to return 404 every time.
-    # Fix: URL-encode the job_id so slashes become %2F — the router sees one param.
-    from urllib.parse import quote
     raw_job_id = response_data.get("job_id", st.session_state["job_id"])
-    task_id    = quote(raw_job_id, safe="")   # "datasets%2Fuser%2F...%2Ffile.parquet"
+    task_id    = quote(raw_job_id, safe="")   
 
-    st.session_state["train_job_id"] = raw_job_id   # store decoded for display
+    st.session_state["train_job_id"] = raw_job_id   
     st.session_state["prob_type"]    = prob_type
     st.session_state["target_col"]   = target_col
 
@@ -126,6 +122,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
     if final:
         st.session_state["train_status"] = final
         st.success(f"Training complete!  ·  `{prob_type}`  ·  target: `{target_col}`")
+
 
 
 def show_metrics() -> None:

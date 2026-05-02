@@ -20,6 +20,7 @@ from core.evaluation.forecasting_metrics import ForecastingMetrics
 from core.evaluation.backtesting import TimeSeriesBacktester
 from core.drift.drift_detector import DriftDetector
 from core.models.model_registry import ModelRegistry
+from storage.s3_client import S3Client
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -95,48 +96,39 @@ class TemporalPipelineConfig:
 
 
 class TemporalPipeline(BasePipeline):
-    """
-    End-to-end forecasting pipeline.
-
-    Execution order (enforced by BasePipeline._execution_plan):
-      1. _validate            quality gate + schema check + circuit breaker
-      2. _detect_problem_type sets ProblemType.FORECASTING
-      3. _feature_engineering  temporal decomposition + preprocessing
-      4. _split               chronological train / test split
-      5. _train               fit ProphetModel
-      [evaluation]            ForecastingMetrics on held-out window
-    """
-
-
-
-    # Add this method to your TemporalPipeline class
+    
     def run(self) -> PipelineResult:
-        """Orchestrates the temporal pipeline and returns the standard result."""
+
+        self.df = self.df.with_columns(
+            pl.col(self.datetime_column).str.to_datetime().alias(self.datetime_column)
+        )
+
         self._detect_problem_type()
         self._validate()
         self._feature_engineering()
         self._split()
         self._train()
-        self.model = None
-        self.registry = {}
-        
+        if self.config.run_backtest:
+            self._run_backtesting()
         metrics = self._evaluate_final()
-        
-        # Use the metadata from the registry if available, else local state
+        if self.config.auto_register:
+            self._register_model()
+        version_raw = self._registry_metadata.get("version", "1")
+        semver = f"{version_raw}.0.0" if "." not in str(version_raw) else str(version_raw)
         return PipelineResult(
             status="SUCCESS",
             model_name=self._registry_metadata.get("model_name", f"prophet_{self.experiment_id}"),
-            model_version=str(self._registry_metadata.get("version", "1")),
+            model_version=semver,
             metrics=metrics,
-            artifacts_path=self._registry_metadata.get("path", self.config.registry_path),
-            feature_columns=self.features
+            artifacts_path=self._registry_metadata.get("artifact_key", self.config.registry_path),
+            feature_columns=self.features,
         )
 
     def __init__(
         self,
         dataframe:       pl.DataFrame,
         target_column:   str,
-        s3_client: Any,
+        s3_client: S3Client,
         datetime_column: str,                            
         experiment_id:   str = "temporal_exp",
         config:          Optional[TemporalPipelineConfig] = None,
@@ -190,7 +182,7 @@ class TemporalPipeline(BasePipeline):
         )
         self._metrics_engine = ForecastingMetrics(seasonal_period=7)
         self._drift_detector = DriftDetector(threshold=self.config.drift_threshold)
-        self._registry       = ModelRegistry(base_path=self.config.registry_path)
+
 
     
     def _validate(self) -> None:
@@ -358,14 +350,7 @@ class TemporalPipeline(BasePipeline):
         self.model.fit(train_pd)
         logger.info("[Train] ProphetModel fitted successfully.")
 
-        #  Optional: Walk-forward backtesting 
-        if self.config.run_backtest:
-            self._run_backtesting()
-
-        #  Register model 
-        if self.config.auto_register:
-            self._register_model()
-
+       
    
 
     def _evaluate_final(self) -> Dict[str, float]:

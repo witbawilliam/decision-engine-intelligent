@@ -210,11 +210,5 @@ async def predict(
 def health(
     service: Annotated[PredictionService, Depends(get_prediction_service)],
 ):
-    """
-    Calls PredictionService.health() which pings:
-      - redis_client.ping()    → checks feature cache + Celery broker
-      - postgres_client.ping() → checks audit log DB
- 
-    Returns {"redis": True/False, "postgres": True/False}
-    """
+    
     return service.health()

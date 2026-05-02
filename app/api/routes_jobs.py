@@ -70,7 +70,7 @@ def _dispatch(task_type: str, request: V1.JobCreate) -> V1.JobStatusResponse:
 
 
 @router.get(
-    "/status/{job_id}",
+    "/status/{job_id:path}",
     response_model=V1.JobStatusResponse,
 )
 async def get_job_status(job_id: str):

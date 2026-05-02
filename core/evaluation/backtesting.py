@@ -93,6 +93,7 @@ class TimeSeriesBacktester:
     def _evaluate_fold(self, model_factory, train: pl.DataFrame, test: pl.DataFrame) -> Dict[str, float]:
         
         model = model_factory()
+        model.fit(train.to_pandas())
         model.fit(train)
         
         forecast = model.predict(self.horizon)

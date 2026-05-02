@@ -302,7 +302,10 @@ def train_temporal_task(self, job_payload: dict) -> TaskResult:
                 progress.report("loading_data", percent=10)
                 df = pl.scan_parquet(local_path).collect()
 
-                time_col   = job_payload.get("time_column") or job_payload.get("datetime_column")
+                time_col   = job_payload.get("time_column")
+                if time_col is None:
+                  time_col = job_payload.get("datetime_column")
+  
                 target_col = job_payload.get("target_column")
 
                 if not time_col:

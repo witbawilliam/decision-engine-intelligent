@@ -146,8 +146,7 @@ class ProphetModel:
         
         if len(prophet_df) < MIN_TRAINING_ROWS:
             raise ValueError(
-                f"Insufficient rows: requres at least. "
-                f" {MIN_TRAINING_ROWS} rows after cleaning."
+                f"Insufficient data: requres at least {MIN_TRAINING_ROWS} rows after cleaning."
             )
             
 
@@ -156,7 +155,7 @@ class ProphetModel:
         self._train_df  = prophet_df
         self._is_fitted = True
 
-        logger.info("[ProphetModel:%s] Training complete — %d rows.", self.model_id, len(prophet_df),  MIN_TRAINING_ROWS)
+        logger.info("[ProphetModel:%s] Training complete — %d rows.", self.model_id, len(prophet_df))
         return self
 
     def make_future_dataframe(

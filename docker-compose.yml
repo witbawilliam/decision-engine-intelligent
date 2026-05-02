@@ -23,16 +23,17 @@ services:
       retries: 5
 
   s3:
-    image: localstack/localstack:latest
+    image: localstack/localstack:3.4
     ports:
       - "4566:4566"
     environment:
       - SERVICES=s3
       - DEFAULT_REGION=us-east-1
       - PERSISTENCE=1 
+      - ACTIVATE_PRO=0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
     volumes:

@@ -43,7 +43,7 @@ class TabularPipeline(BasePipeline):
 
     def __init__(self, df: pl.DataFrame, target_column: str, s3_client: S3Client, **kwargs):
         super().__init__(df, target_column, **kwargs)
-        self.s3_client = s3_client  # Store the client
+        self.s3_client = s3_client 
     
 
     def execute_pipeline(self, model_name: str) -> PipelineResult:

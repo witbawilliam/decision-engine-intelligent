@@ -10,7 +10,7 @@ from core.pipelines.base_pipeline import BasePipeline
 from core.contracts.schema_inference import SchemaInference
 from core.contracts.schema_validator import SchemaValidator
 from core.feature_engineering.data_quality import DataQualityAnalyzer
-from core.feature_engineering.preprocessing_utils import FeatureProcessor
+from core.feature_engineering.preprocessing_utils import FeatureProcessor, ScalingStrategy,  ImputationStrategy
 from core.models.xgboost_model import XGBoostModel
 from core.evaluation.regression_metrics import RegressionMetrics
 from core.evaluation.feature_importance import XGBExplainer
@@ -41,8 +41,19 @@ class PipelineResult:
 
 class TabularPipeline(BasePipeline):
 
-    def __init__(self, df: pl.DataFrame, target_column: str, s3_client: S3Client, **kwargs):
-        super().__init__(df, target_column, **kwargs)
+    def __init__(self, df: pl.DataFrame, target_column: str, s3_client: S3Client, problem_type: Optional[str] = None, **kwargs):
+
+        resolved = None
+        if problem_type is not None:
+            try:
+                resolved = ProblemType[problem_type.upper()]
+            except KeyError:
+                raise ValueError(
+                    f"Invalid problem_type '{problem_type}'. "
+                    "Must be: regression | classification | forecasting"
+                )    
+            
+        super().__init__(df, target_column, problem_type=resolved, **kwargs)
         self.s3_client = s3_client 
     
 
@@ -60,14 +71,15 @@ class TabularPipeline(BasePipeline):
             self._feature_engineering()
             self._split()
             self._train()
-            
-            # Evaluation
+
+
             self._cached_metrics = self._evaluate_final()
-            self._cached_drift = self._check_drift()
-            
-            # Persistence
-            # Assuming your save_to_registry returns the registration info
+            self._cached_drift   = self._check_drift()
+
+
             registration = self.save_to_registry(model_name=model_name)
+        
+            
 
             # Construct the Contract
             result = PipelineResult(
@@ -93,32 +105,32 @@ class TabularPipeline(BasePipeline):
     
     
     def _detect_problem_type(self) -> None:
-        """
-        Uses the Intelligence Engine to auto-discover the target 
-        and determine if we are doing Classification or Regression.
-        """
-        
-        engine = TabularIntelligenceEngine(
-            df=self.df, 
-            target_column=self.target_column
-        )
-
+        engine = TabularIntelligenceEngine(df=self.df, target_column=self.target_column)
         self.target_column = engine.target_column
 
+        
+        existing = getattr(self, "problem_type", None)
+        if existing is not None and isinstance(existing, ProblemType):
+            logger.info(f"Problem type provided by caller: {existing.name} — skipping auto-detection.")
+            return
+
         detected_str = engine._detect_problem_type()
+        logger.info(f"Auto-detected problem type: {detected_str}")
 
-        if detected_str == "classification":
-            self.problem_type = ProblemType.CLASSIFICATION
-        elif detected_str == "regression":
-            self.problem_type = ProblemType.REGRESSION
+        mapping = {
+            "regression":     ProblemType.REGRESSION,
+            "classification": ProblemType.CLASSIFICATION,
+        }
+
+        if detected_str in mapping:
+            self.problem_type = mapping[detected_str]
         else:
-            
-            logger.warning(
-                f"Unknown problem type '{detected_str}' returned by engine. "
-                "Defaulting to CLASSIFICATION — verify this is correct."
+           
+            raise ValueError(
+                f"Could not determine problem type for target '{self.target_column}'. "
+                "Please specify problem_type explicitly in your request "
+                "(regression | classification | forecasting)."
             )
-
-            self.problem_type = ProblemType.CLASSIFICATION 
 
         logger.info(f"Target identified: {self.target_column}")
         logger.info(f"Problem type locked: {self.problem_type.name}")
@@ -161,38 +173,75 @@ class TabularPipeline(BasePipeline):
     
     
     
-
     def _feature_engineering(self) -> None:
         """
-        Stateless feature processing.
-        Returns processed dataframe + metadata.
+        Feature preprocessing using the production FeatureProcessor.
+
+        Execution order (all inside FeatureProcessor.fit_transform):
+          1. Target validation   — sentinel cleanup, null drop, dtype cast
+          2. Duplicate removal
+          3. Feature string cleaning — sentinels → null in feature cols
+          4. Column classification  — numeric / temporal / categorical
+          5. Feature selection   — leakage, low-variance, high-null pruning
+          6. Imputation          — fit medians/modes on THIS training data
+          7. Encoding            — fit ordinal maps on THIS training data
+          8. Scaling             — fit stats on THIS training data (NONE for XGBoost)
+
+        The fitted processor is stored on self.processor so predict()
+        can call self.processor.transform(inference_df) and reuse the
+        exact same statistics — no training-serving skew.
         """
-
         self.processor = FeatureProcessor(
-            target_column=self.target_column
+            target_column    = self.target_column,
+            problem_type     = self.problem_type,       # drives target casting + scaling advice
+            scaling_strategy = ScalingStrategy.NONE,    # XGBoost is scale-invariant
+            leakage_threshold  = 0.995,
+            variance_threshold = 1,
+            null_threshold     = 0.60,
         )
-        processed_df, metadata = self.processor.process(self.df)
 
+        processed_df, metadata = self.processor.fit_transform(self.df)
 
-        self.df = processed_df
+        self.df                   = processed_df
         self.preprocessing_metadata = metadata
 
-        # Derive feature lists from processed dataframe
+        # Derive feature lists from the cleaned schema
+        # (columns may have been dropped by the selector)
         self.numeric_features = [
             c for c, t in self.df.schema.items()
             if t.is_numeric() and c != self.target_column
         ]
-
         self.categorical_features = [
             c for c, t in self.df.schema.items()
             if not t.is_numeric() and c != self.target_column
         ]
 
         logger.info(
-            f"Feature engineering complete: "
-            f"{len(self.numeric_features)} numeric, "
-            f"{len(self.categorical_features)} categorical"
+            "Feature engineering complete: %d numeric, %d categorical | "
+            "dropped=%d, leaked=%d, imputed=%d, encoded=%d | %.1f ms",
+            len(self.numeric_features),
+            len(self.categorical_features),
+            len(metadata.dropped_features),
+            len(metadata.leaked_features),
+            len(metadata.imputed_features),
+            len(metadata.encoded_features),
+            metadata.execution_time_ms,
         )
+
+        if metadata.is_imbalanced:
+            logger.warning(
+                "Class imbalance detected in target '%s'. "
+                "Consider class_weight or oversampling before training.",
+                self.target_column,
+            )
+
+        if metadata.target_rows_dropped > 0:
+            logger.warning(
+                "%d rows dropped during target validation "
+                "(null or sentinel values in '%s').",
+                metadata.target_rows_dropped,
+                self.target_column,
+            )
 
     
     

@@ -85,16 +85,15 @@ class RegressionMetrics:
     
     
 
-    def _r2(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
-        """Calculates R-Squared with zero-variance protection."""
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        
-        
-        if np.var(y_true) < self.epsilon:
-          logger.warning("R2 undefined: Target variable has zero variance.")
-          return None
-        return float(1 - (ss_res / y_true))
+    def _r2(self, y_true, y_pred) -> float:
+        y_true  = np.asarray(y_true, dtype=np.float64)
+        y_pred  = np.asarray(y_pred, dtype=np.float64)
+        ss_res  = np.sum((y_true - y_pred) ** 2)          
+        ss_tot  = np.sum((y_true - np.mean(y_true)) ** 2) 
+        if ss_tot == 0:
+
+            return 1.0 if ss_res == 0 else 0.0
+        return float(1 - (ss_res / ss_tot))               
 
     def _adjusted_r2(self, r2: Optional[float], n: int, p: Optional[int]) -> Optional[float]:
         """Adjusts R2 for the number of predictors to prevent overfitting artifacts."""

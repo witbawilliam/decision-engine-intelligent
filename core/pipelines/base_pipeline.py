@@ -57,6 +57,7 @@ class BasePipeline(ABC):
         target_column: str,
         datetime_column: Optional[str] = None,
         experiment_id: str = "default_exp",
+        problem_type: Optional[ProblemType] = None,
     ):
         if dataframe is None or dataframe.height == 0:
             raise ValueError("Pipeline requires a non-empty DataFrame.")
@@ -70,7 +71,7 @@ class BasePipeline(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # Runtime state
-        self.problem_type: Optional[ProblemType] = None
+        self.problem_type: Optional[ProblemType] = problem_type
         self.model: Any = None
         self.features: List[str] = []
         self.is_fitted: bool = False

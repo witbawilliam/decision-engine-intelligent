@@ -89,40 +89,58 @@ def load_preview(file, nrows: int = 500) -> pd.DataFrame | None:
         return None
 
 
-
 def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
+    # 1. NORMALIZE: standardizes "Forecasting" or "Regression" to lowercase
+    normalized_prob = prob_type.lower().strip()
+
+    # 2. BASE PAYLOAD
     payload = {
-        "idempotency_key": st.session_state["job_id"],
+        "idempotency_key": f"{st.session_state['job_id']}_{normalized_prob}",
         "user_id":         "550e8400-e29b-41d4-a716-446655440000",
         "filename":        st.session_state.get("filename", ""),
         "s3_key":          st.session_state["job_id"],
-        "problem_type":    prob_type,
+        "problem_type":    normalized_prob, 
         "target_column":   target_col,
     }
 
+    # 3. FORECASTING/TEMPORAL LOGIC: Add mandatory time parameters
+    # If the user chose forecasting/temporal, the backend MUST know the time axis.
+    if normalized_prob in ["forecasting", "temporal"]:
+        time_col = st.session_state.get("selected_time_col")
+        
+        if not time_col:
+            st.error("Time Column selection is required for Forecasting.")
+            return
+            
+        payload["time_column"] = time_col
+        # Default horizon if not set (e.g., 30 steps ahead)
+        payload["forecast_horizon"] = st.session_state.get("forecast_horizon", 30)
+
+    # 4. DISPATCH
+    print(f"DEBUG: Dispatching {normalized_prob} for {target_col}")
     train_res = safe_request("POST", f"{API_BASE_URL}{endpoint}", json=payload)
 
-    if train_res is None:
-        return
-    if train_res.status_code not in (200, 202):
-        st.error(f"Dispatch failed (HTTP {train_res.status_code}): {train_res.text}")
+    if train_res is None or train_res.status_code not in (200, 202):
+        err = train_res.text if train_res else "No Response"
+        st.error(f"Dispatch failed: {err}")
         return
 
+    # 5. STATE MANAGEMENT
     response_data = train_res.json()
-    raw_job_id = response_data.get("job_id", st.session_state["job_id"])
+    raw_job_id = response_data.get("job_id", payload["idempotency_key"])
     task_id    = quote(raw_job_id, safe="")   
 
     st.session_state["train_job_id"] = raw_job_id   
-    st.session_state["prob_type"]    = prob_type
+    st.session_state["prob_type"]    = normalized_prob
     st.session_state["target_col"]   = target_col
 
+    # 6. POLLING
     st.caption(f"Polling status for `{raw_job_id}` …")
-
     final = poll_job(task_id)
+    
     if final:
         st.session_state["train_status"] = final
-        st.success(f"Training complete!  ·  `{prob_type}`  ·  target: `{target_col}`")
-
+        st.success(f"Training complete! · `{normalized_prob}` · target: `{target_col}`")
 
 
 def show_metrics() -> None:
@@ -149,7 +167,7 @@ def show_metrics() -> None:
 # PAGE
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="AI Decision Intelligence", layout="wide")
-st.title("🚀 AutoML Decision Dashboard")
+st.title(" AutoML Decision Dashboard")
 
 # ── 1. UPLOAD ────────────────────────────────────────────────────────────────
 st.header("1. Data Ingestion")
@@ -182,13 +200,13 @@ if uploaded_file:
 
             st.success(f"Dataset uploaded!  ·  Job ID: `{data['job_id']}`")
 
-            st.subheader("📊 Dataset Ingestion Summary")
+            st.subheader("Dataset Ingestion Summary")
             c1, c2, c3, _ = st.columns(4)
             c1.metric("Rows",    data.get("rows",    "N/A"))
             c2.metric("Columns", data.get("columns", "N/A"))
             c3.info(f"Merged: {data.get('merged', False)}")
 
-            st.write("### ⚠️ Data Quality Alerts")
+            st.write("###  Data Quality Alerts")
             if data.get("rows", 0) < 100:
                 st.warning("Low sample size — training results may be unreliable.")
             if data.get("missing_count", 0) > 10:
@@ -207,7 +225,7 @@ else:
     columns = st.session_state.get("df_columns", [])
 
     # ── Shared config (target column) ─────────────────────────────────────────
-    st.subheader("⚙️ Shared Configuration")
+    st.subheader(" Shared Configuration")
 
     if columns:
         # "— select —" sentinel forces the user to make an explicit choice.
@@ -215,13 +233,13 @@ else:
         # which is almost never the right target — the user must pick it.
         target_col = st.selectbox(
             "Target Column",
-            options=["— select a target column —"] + columns,
+            options=[" select a target column "] + columns,
             index=0,
             help="The column your model will learn to predict. Applies to both pipelines.",
         )
-        if target_col == "— select a target column —":
+        if target_col == " select a target column ":
             target_col = None
-            st.warning("⬆️ Choose your target column before running either pipeline.")
+            st.warning("⬆ Choose your target column before running either pipeline.")
     else:
         target_col = st.text_input(
             "Target Column Name",
@@ -230,12 +248,12 @@ else:
             help="Type the exact column name to predict.",
         ) or None
         if not target_col:
-            st.warning("⬆️ Type your target column name before running either pipeline.")
+            st.warning(" Type your target column name before running either pipeline.")
 
     st.divider()
 
     # ── Two pipeline tabs ─────────────────────────────────────────────────────
-    tab_tabular, tab_forecast = st.tabs(["📊 Tabular Pipeline", "📈 Forecasting Pipeline"])
+    tab_tabular, tab_forecast = st.tabs(["Tabular Pipeline", "Forecasting Pipeline"])
 
     # ── TAB 1: Tabular (/v1/train/tabular) ───────────────────────────────────
     with tab_tabular:

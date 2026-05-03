@@ -232,6 +232,7 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
                 pipeline = TabularPipeline(
                     df=df,
                     target_column=job_payload["target_column"],
+                    problem_type=job_payload.get("problem_type"),
                     s3_client=s3
                 )
 

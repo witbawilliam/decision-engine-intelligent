@@ -4,11 +4,13 @@ import logging
 import uuid
 import warnings
 from typing import Any, Dict, List, Optional
+import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import polars as pl
-from core.pipelines.base_pipeline import BasePipeline, PipelineResult
+from core.pipelines.base_pipeline import BasePipeline, PipelineResult, PipelineMetadata
 from core.contracts.problem_type import ProblemType
 from core.feature_engineering.data_quality import DataQualityAnalyzer
 from core.contracts.schema_validator import SchemaValidator, DatasetSchema, ColumnContract
@@ -95,13 +97,13 @@ class TemporalPipelineConfig:
 
 
 
+
 class TemporalPipeline(BasePipeline):
     
     def run(self) -> PipelineResult:
 
-        self.df = self.df.with_columns(
-            pl.col(self.datetime_column).str.to_datetime().alias(self.datetime_column)
-        )
+        start_ts = datetime.utcnow()
+        start_wall = time.perf_counter()
 
         self._detect_problem_type()
         self._validate()
@@ -113,15 +115,36 @@ class TemporalPipeline(BasePipeline):
         metrics = self._evaluate_final()
         if self.config.auto_register:
             self._register_model()
+
+        end_ts = datetime.utcnow()    
+        duration = time.perf_counter() - start_wall
         version_raw = self._registry_metadata.get("version", "1")
         semver = f"{version_raw}.0.0" if "." not in str(version_raw) else str(version_raw)
+
+        metadata = PipelineMetadata(
+            execution_id=self.experiment_id,
+            start_time=start_ts,
+            end_time=end_ts,
+            duration=duration,
+            step_timings={}, 
+            system_info={"executor": "TemporalPipeline"}
+        )
+
+        
+
         return PipelineResult(
-            status="SUCCESS",
             model_name=self._registry_metadata.get("model_name", f"prophet_{self.experiment_id}"),
-            model_version=semver,
+            problem_type=self.problem_type,
             metrics=metrics,
-            artifacts_path=self._registry_metadata.get("artifact_key", self.config.registry_path),
-            feature_columns=self.features,
+            artifacts={
+            "artifacts_key": self._registry_metadata.get("artifact_key", self.config.registry_path),
+            "feature_columns": self.features,
+            "model_version": semver,
+            "backtest_summary": self._backtest_summary
+            },
+
+            metadata=metadata
+        
         )
 
     def __init__(
@@ -177,8 +200,10 @@ class TemporalPipeline(BasePipeline):
         )
         self._preprocessor = FeatureProcessor(
             target_column     = self.target_column,
+            problem_type      = ProblemType.FORECASTING,
             numeric_strategy  = self.config.numeric_imputation,
             leakage_threshold = self.config.leakage_threshold,
+            scaling_strategy  = "none",
         )
         self._metrics_engine = ForecastingMetrics(seasonal_period=7)
         self._drift_detector = DriftDetector(threshold=self.config.drift_threshold)
@@ -289,7 +314,7 @@ class TemporalPipeline(BasePipeline):
 
         # General preprocessing (imputation, encoding, leakage removal)
         logger.info("[FeatureEngineering] Applying FeatureProcessor …")
-        processed_features, meta = self._preprocessor.process(self.df.select(cols_to_process))
+        processed_features, meta = self._preprocessor.fit_transform(self.df.select(cols_to_process))
         self.df = pl.concat([
         self.df.select(self.datetime_column),
         processed_features
@@ -384,12 +409,11 @@ class TemporalPipeline(BasePipeline):
             })
 
         logger.info(
-            "[Evaluate] MAE=%.4f  RMSE=%.4f  SMAPE=%.4f  WAPE=%.4f  R2=%s  MASE=%s",
+            "[Evaluate] MAE=%.4f  RMSE=%.4f  SMAPE=%.4f  WAPE=%.4f    MASE=%s",
             metrics.get("mae",   float("nan")),
             metrics.get("rmse",  float("nan")),
             metrics.get("smape", float("nan")),
             metrics.get("wape",  float("nan")),
-            metrics.get("r2"),
             metrics.get("mase"),
         )
 
@@ -449,7 +473,7 @@ class TemporalPipeline(BasePipeline):
         def model_factory():
             """Returns a fresh ProphetModel — must be pickleable."""
             return ProphetModel(
-                time_column             = cfg.datetime_column if hasattr(cfg, "datetime_column") else self.datetime_column,
+                time_column             = self.datetime_column,
                 target_column           = self.target_column,
                 seasonality_mode        = cfg.seasonality_mode,
                 yearly_seasonality      = cfg.yearly_seasonality,

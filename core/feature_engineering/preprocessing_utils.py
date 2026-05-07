@@ -1,31 +1,3 @@
-"""
-preprocessing_utils.py
-──────────────────────
-Production-grade feature preprocessing — single FeatureProcessor class.
-
-All logic (target validation, feature selection, imputation, encoding,
-scaling) lives inside FeatureProcessor. Sub-components are private inner
-classes instantiated by the processor; callers never touch them directly.
-
-Usage (training)
-────────────────
-    processor = FeatureProcessor(
-        target_column="price",
-        problem_type=ProblemType.REGRESSION,
-        scaling_strategy=ScalingStrategy.NONE,   # XGBoost doesn't need scaling
-    )
-    clean_df, meta = processor.fit_transform(df)
-
-Usage (inference — uses training statistics, no skew)
-─────────────────────────────────────────────────────
-    clean_df, meta = processor.transform(inference_df)
-
-Persistence
-───────────
-    Pickle the fitted processor and save it to the model registry alongside
-    the model. Inference always deserialises the same processor instance so
-    imputation fills, encoding maps, and scaling params are identical.
-"""
 
 from __future__ import annotations
 
@@ -42,9 +14,7 @@ from core.contracts.problem_type import ProblemType
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENUMS
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 class ImputationStrategy(str, Enum):
     MEAN   = "mean"
@@ -59,9 +29,6 @@ class ScalingStrategy(str, Enum):
     NONE     = "none"       # pass-through (trees don't need scaling)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────────────────────
 
 _SENTINEL_STRINGS: Set[str] = {
     "unknown", "none", "na", "n/a", "null", "nan",
@@ -78,9 +45,6 @@ _TEMPORAL_DTYPES = (pl.Date, pl.Datetime, pl.Duration, pl.Time)
 _STRING_DTYPES   = (pl.Utf8, pl.Categorical, pl.Enum)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# METADATA CONTRACT
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class PreprocessingMetadata:
@@ -96,27 +60,9 @@ class PreprocessingMetadata:
     execution_time_ms:   float     = 0.0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# FEATURE PROCESSOR
-# ─────────────────────────────────────────────────────────────────────────────
 
 class FeatureProcessor:
-    """
-    Single-class production preprocessor.
-
-    Responsibilities (in execution order):
-      1. Target validation   — sentinel replacement, null drop, dtype cast
-      2. Duplicate removal   — exact-row deduplication
-      3. Feature string cleaning — sentinel → null in all string feature cols
-      4. Column classification   — numeric / temporal / categorical
-      5. Feature selection   — leakage, low-variance, high-null pruning
-      6. Imputation          — fit medians/modes on train; apply at inference
-      7. Encoding            — fit ordinal maps on train; apply at inference
-      8. Scaling             — fit stats on train; apply at inference
-
-    State is stored on self after fit_transform() and reused by transform().
-    The fitted instance must be pickled and saved to the model registry.
-    """
+   
 
     def __init__(
         self,
@@ -145,21 +91,16 @@ class FeatureProcessor:
         self._numeric_cols:  List[str]                    = []
         self._cat_cols:      List[str]                    = []
         self._temporal_cols: List[str]                    = []
-        # Imputer state
         self._numeric_fills:  Dict[str, float]            = {}
         self._category_fills: Dict[str, Any]              = {}
-        # Encoder state
         self._encoding_maps: Dict[str, Dict[Any, int]]    = {}
-        # Scaler state
         self._scaling_params: Dict[str, Dict[str, float]] = {}
         # Audit
         self._scaled_cols:   List[str]                    = []
         self._encoded_cols:  List[str]                    = []
         self._imputed_cols:  List[str]                    = []
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # PUBLIC API
-    # ═════════════════════════════════════════════════════════════════════════
+   
 
     def fit_transform(
         self, df: pl.DataFrame
@@ -176,23 +117,18 @@ class FeatureProcessor:
         start        = time.perf_counter()
         removed_rows = 0
 
-        # ── 1. Target validation ─────────────────────────────────────────────
         target_rows_dropped = 0
         if self.target_column in df.columns:
             before = df.height
             df = self._validate_target(df)
             target_rows_dropped = before - df.height
 
-        # ── 2. Duplicate removal ─────────────────────────────────────────────
         df, removed_rows = self._remove_duplicates(df)
 
-        # ── 3. Feature string cleaning ───────────────────────────────────────
         df = self._clean_feature_strings(df)
 
-        # ── 4. Column classification ─────────────────────────────────────────
         self._classify_columns(df)
 
-        # ── 5. Feature selection ─────────────────────────────────────────────
         leaked, low_var, high_null = self._select_features(df)
         self._to_drop = list(set(leaked + low_var + high_null))
 
@@ -202,16 +138,13 @@ class FeatureProcessor:
 
         lf = df.lazy().drop(self._to_drop)
 
-        # ── 6. Imputation (fit + transform) ──────────────────────────────────
         lf = self._fit_imputer(df, lf, active_numeric, active_cat + active_temporal)
 
-        # ── 7. Encoding (fit + transform) ────────────────────────────────────
         lf = self._fit_encoder(df, lf, active_cat, active_temporal)
 
-        # ── 8. Scaling (fit + transform) ─────────────────────────────────────
         lf = self._fit_scaler(df, lf, active_numeric)
 
-        # ── Collect ──────────────────────────────────────────────────────────
+        
         try:
             result_df = lf.collect()
         except Exception as exc:
@@ -294,9 +227,7 @@ class FeatureProcessor:
         """Expose fitted scaler params for model registry serialisation."""
         return dict(self._scaling_params)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 1 — TARGET VALIDATION
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _validate_target(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -361,9 +292,7 @@ class FeatureProcessor:
 
         return df
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 2 — DUPLICATE REMOVAL
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _remove_duplicates(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, int]:
         clean   = df.unique(maintain_order=True)
@@ -372,9 +301,7 @@ class FeatureProcessor:
             logger.info("Removed %d duplicate rows.", removed)
         return clean, removed
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 3 — FEATURE STRING CLEANING
-    # ═════════════════════════════════════════════════════════════════════════
+   
 
     def _clean_feature_strings(self, df: pl.DataFrame) -> pl.DataFrame:
         """
@@ -400,9 +327,7 @@ class FeatureProcessor:
         ]
         return df.with_columns(exprs)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 4 — COLUMN CLASSIFICATION
-    # ═════════════════════════════════════════════════════════════════════════
+   
 
     def _classify_columns(self, df: pl.DataFrame) -> None:
         schema = df.schema
@@ -419,9 +344,7 @@ class FeatureProcessor:
             if isinstance(t, _STRING_DTYPES) and c != self.target_column
         ]
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 5 — FEATURE SELECTION
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _select_features(
         self, df: pl.DataFrame
@@ -466,10 +389,7 @@ class FeatureProcessor:
             if df[c].null_count() / df.height >= self.null_threshold
         ]
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 6 — IMPUTATION
-    # ═════════════════════════════════════════════════════════════════════════
-
+    
     def _fit_imputer(
         self,
         df:           pl.DataFrame,
@@ -508,9 +428,7 @@ class FeatureProcessor:
             exprs.append(pl.col(col).fill_null(val))
         return lf.with_columns(exprs) if exprs else lf
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 7 — ENCODING
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _fit_encoder(
         self,
@@ -561,9 +479,7 @@ class FeatureProcessor:
             )
         return lf.with_columns(exprs) if exprs else lf
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # STEP 8 — FEATURE SCALING
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _fit_scaler(
         self,
@@ -571,23 +487,9 @@ class FeatureProcessor:
         lf:           pl.LazyFrame,
         numeric_cols: List[str],
     ) -> pl.LazyFrame:
-        """
-        Compute scaling statistics from training data and store on self.
-
-        Strategies
-        ──────────
-        STANDARD  → z-score: (x − mean) / std
-                    Best for linear models, SVMs, neural networks.
-        MINMAX    → (x − min) / (max − min) → [0, 1]
-                    Best when a bounded range is required.
-        ROBUST    → (x − median) / IQR        ← default
-                    Best for real-world data with outliers (prices, durations).
-                    Works for regression, classification, and forecasting.
-        NONE      → pass-through.
-                    Use for XGBoost / tree-based models (split-based, scale-invariant).
-
-        The target column is NEVER scaled — only feature columns.
-        """
+    
+  
+        
         if self.scaling_strategy == ScalingStrategy.NONE:
             return lf
 
@@ -631,9 +533,7 @@ class FeatureProcessor:
         ]
         return lf.with_columns(exprs)
 
-    # ═════════════════════════════════════════════════════════════════════════
-    # UTILITIES
-    # ═════════════════════════════════════════════════════════════════════════
+    
 
     def _check_imbalance(self, df: pl.DataFrame) -> bool:
         """Flag if the dominant class exceeds 80% of the target distribution."""

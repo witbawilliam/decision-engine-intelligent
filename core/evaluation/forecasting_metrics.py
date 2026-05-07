@@ -18,7 +18,6 @@ class ForecastMetricResult:
     smape: float
     mase: Optional[float]
     wape: float
-    r2: Optional[float]
     bias: float               
     coverage_80: Optional[float] = None # Added: Probabilistic quality
 
@@ -61,7 +60,6 @@ class ForecastingMetrics:
         mape = self._mape(y_true, y_pred)
         smape = self._smape(y_true, y_pred)
         wape = self._wape(y_true, y_pred)
-        r2 = self._r2(y_true, y_pred)
         bias = self._bias(y_true, y_pred)
 
         # Comparative Metric
@@ -76,7 +74,6 @@ class ForecastingMetrics:
             smape=smape,
             mase=mase,
             wape=wape,
-            r2=r2,
             bias=bias
         )
 
@@ -116,12 +113,7 @@ class ForecastingMetrics:
             return 0.0 if np.sum(np.abs(y_pred)) < 1e-9 else 100.0
         return float(np.sum(np.abs(y_true - y_pred)) / actual_sum * 100)
 
-    def _r2(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
-        ss_res = np.sum((y_true - y_pred) ** 2)
-        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-        if ss_tot < 1e-9:
-            return None # Undefined for constant actuals
-        return float(1 - (ss_res / ss_tot))
+    
 
     def _mase(self, y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray) -> Optional[float]:
         """

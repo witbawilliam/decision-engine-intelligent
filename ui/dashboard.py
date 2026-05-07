@@ -89,7 +89,7 @@ def load_preview(file, nrows: int = 500) -> pd.DataFrame | None:
         return None
 
 
-def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
+def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: str ) -> None:
     # 1. NORMALIZE: standardizes "Forecasting" or "Regression" to lowercase
     normalized_prob = prob_type.lower().strip()
 
@@ -106,7 +106,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str) -> None:
     # 3. FORECASTING/TEMPORAL LOGIC: Add mandatory time parameters
     # If the user chose forecasting/temporal, the backend MUST know the time axis.
     if normalized_prob in ["forecasting", "temporal"]:
-        time_col = st.session_state.get("selected_time_col")
+        
         
         if not time_col:
             st.error("Time Column selection is required for Forecasting.")
@@ -239,7 +239,7 @@ else:
         )
         if target_col == " select a target column ":
             target_col = None
-            st.warning("⬆ Choose your target column before running either pipeline.")
+            st.warning(" Choose your target column before running either pipeline.")
     else:
         target_col = st.text_input(
             "Target Column Name",
@@ -252,10 +252,10 @@ else:
 
     st.divider()
 
-    # ── Two pipeline tabs ─────────────────────────────────────────────────────
+    # Two pipeline tabs 
     tab_tabular, tab_forecast = st.tabs(["Tabular Pipeline", "Forecasting Pipeline"])
 
-    # ── TAB 1: Tabular (/v1/train/tabular) ───────────────────────────────────
+    # Tabular 
     with tab_tabular:
         st.caption("Endpoint: `POST /v1/train/tabular`  ·  Accepts: regression, classification")
 
@@ -286,12 +286,12 @@ else:
         if not target_col:
             st.warning("Select a target column above before running.")
         else:
-            if st.button("▶ Run Tabular Pipeline", type="primary", key="btn_tabular"):
+            if st.button(" Run Tabular Pipeline", type="primary", key="btn_tabular"):
                 # Write the widget value into session_state BEFORE dispatch
                 # so session_state never holds a stale prob_type from a previous run.
                 st.session_state["prob_type"]  = tabular_prob
                 st.session_state["target_col"] = target_col
-                dispatch_training("/v1/train/tabular", tabular_prob, target_col)
+                dispatch_training("/v1/train/tabular", tabular_prob, target_col, None)
 
         # Confirmation banner — shows exactly what was sent to the API
         if st.session_state.get("prob_type") and "train_job_id" in st.session_state:
@@ -303,7 +303,7 @@ else:
 
         show_metrics()
 
-    # ── TAB 2: Forecasting (/v1/train/forecast) ───────────────────────────────
+    # Forecasting 
     with tab_forecast:
         st.caption("Endpoint: `POST /v1/train/forecast`  ·  Accepts: forecasting only")
 
@@ -321,16 +321,16 @@ else:
 
             date_col = st.selectbox(
                 "Date / Time Column",
-                options=["— none —"] + columns,
+                options=["- select -"] + columns,
                 key="forecast_date_col",
-                help="Column used as the time axis. Passed to the pipeline as metadata.",
+                help="Column used as the time axis.",
             )
 
             forecast_horizon = st.number_input(
                 "Forecast Horizon (steps)",
                 min_value=1, max_value=365, value=30,
                 key="forecast_horizon",
-                help="How many future steps the model should predict.",
+               
             )
 
         with col_d:
@@ -348,11 +348,14 @@ else:
 
         if not target_col:
             st.warning("Select a target column above before running.")
+        elif date_col == "- select -":
+            st.warning("Select a Date / Time Column before running the forecasting pipeline.")
         else:
+
             if st.button("▶ Run Forecasting Pipeline", type="primary", key="btn_forecast"):
                 st.session_state["prob_type"]  = "forecasting"
                 st.session_state["target_col"] = target_col
-                dispatch_training("/v1/train/forecast", "forecasting", target_col)
+                dispatch_training("/v1/train/forecast", "forecasting", target_col, time_col=date_col)
 
         if st.session_state.get("prob_type") == "forecasting" and "train_job_id" in st.session_state:
             st.info(
@@ -364,7 +367,7 @@ else:
         show_metrics()
 
 
-# ── 3. INSIGHTS & VISUALIZATION ──────────────────────────────────────────────
+# INSIGHTS & VISUALIZATION
 st.divider()
 st.header("3. Insights & Visualization")
 
@@ -401,7 +404,7 @@ if uploaded_file:
             st.plotly_chart(fig_trend, width="stretch")
 
 
-# ── 4. PREDICTION vs ACTUAL ───────────────────────────────────────────────────
+# PREDICTION vs ACTUAL 
 st.divider()
 st.header("4. Prediction vs Actual")
 

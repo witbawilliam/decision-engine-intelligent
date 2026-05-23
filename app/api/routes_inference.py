@@ -1,214 +1,126 @@
-
 import time
-import logging
-from fastapi import APIRouter, Depends, HTTPException, status
 import asyncio
-from typing import Annotated, Optional
+import logging
+from typing import Annotated
 
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 
-from app.schemas.prediction_schema import (
-    PredictionRequest,
-    PredictionResponse,
-    PipelineType,
-    PredictionStatus,
-    PredictionError,
-    ErrorCode,
-    TraceContext,
-)
-
-
-from service.prediction_service import (
-    PredictionService,
-    PredictionRequest as ServiceRequest,   
-)
-from core.models.model_registry import ModelRegistry
-from core.pipelines.tabular_pipeline import TabularPipeline
-import os
-from storage.s3_client import S3Client
+from service.prediction_service import PredictionService, PredictionRequest
+from app.schemas.prediction_schema import PredictionRequest as APIRequest, PredictionResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/inference",
-    tags=["Model Serving"]
-)
+router = APIRouter(prefix="/inference", tags=["Model Serving"])
 
 
-
-_service_instance: Optional[PredictionService] = None
-
-
-def get_prediction_service() -> PredictionService:
-    global _service_instance
-    if _service_instance is None:
-        s3 = S3Client(
-            bucket_name  = os.getenv("S3_DATASETS_BUCKET", "ml-datasets"),
-            access_key   = os.getenv("AWS_ACCESS_KEY_ID"),
-            secret_key   = os.getenv("AWS_SECRET_ACCESS_KEY"),
-            region       = os.getenv("AWS_REGION", "us-east-1"),
-            endpoint_url = os.getenv("S3__ENDPOINT_URL") or None,
-        )
-        registry = ModelRegistry(base_path="ml_registry", s3_client=s3)
-        tabular_pipeline = registry.load("XGBoostModel")
-        _service_instance = PredictionService(tabular_pipeline=tabular_pipeline)
-    return _service_instance  
-
+def get_prediction_service(request: Request) -> PredictionService:
+    """
+    Production-safe dependency:
+    Service is initialized once at app startup and reused.
+    """
+    return request.app.state.prediction_service
 
 
 @router.post(
     "/predict",
     response_model=PredictionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Execute Model Inference",
-    description=(
-        "Validates input via PredictionRequest schema, "
-        "checks Redis cache, dispatches to the correct pipeline, "
-        "enriches via decision_engine, and returns a PredictionResponse."
-    ),
+    summary="Run ML inference with optional explanations"
 )
 async def predict(
-    request: PredictionRequest,
+    request: APIRequest,
     service: Annotated[PredictionService, Depends(get_prediction_service)],
 ):
     start_time = time.perf_counter()
- 
+
     logger.info(
-        "prediction_initiated",
+        "prediction_request_received",
         extra={
-            "model_name":    request.model_name,
-            "request_id":    str(request.request_id),
-            "pipeline_type": request.pipeline_type,
-            "trace_id":      request.trace.trace_id,
+            "request_id": str(request.request_id),
+            "model_name": request.model_name,
         },
     )
- 
-    service_request = ServiceRequest(
-        features      = request.features,
-        model_name    = request.model_name,
-        request_id    = str(request.request_id),
-        trace_id      = request.trace.trace_id,
-        pipeline_type = request.pipeline_type.value,
-    )
- 
+
     try:
-        svc_response = await service.predict(service_request)
- 
        
-        sensitivity = None
-        try:
-            sensitivity = await service.analyze_sensitivity(
-                service_request,
-                pipeline_model=service._tabular,   
-            )
-        except Exception as exc:
-            logger.warning(
-                "sensitivity_analysis_skipped",
-                extra={
-                    "request_id": str(request.request_id),
-                    "error":      str(exc),
-                    "trace_id":   request.trace.trace_id,
-                },
-            )
- 
-        counterfactual = None
-        try:
-            counterfactual = await service.explain_counterfactual(
-                service_request,
-                pipeline_model=service._tabular,   
-                training_data=None,                
-                lever_col="Amount",               
-                target_goal=0,                     
-                bounds=(0, 50000),
-            )
-        except Exception as exc:
-            logger.warning(
-                "counterfactual_skipped",
-                extra={
-                    "request_id": str(request.request_id),
-                    "error":      str(exc),
-                    "trace_id":   request.trace.trace_id,
-                },
-            )
- 
-        risk = service.get_risk_score(service_request)
- 
-        latency_ms = (time.perf_counter() - start_time) * 1000
- 
-        return PredictionResponse(
-            request_id    = request.request_id,
-            trace         = request.trace,
-            model_name    = svc_response.model_name,
-            model_version = svc_response.model_version,
-            status        = PredictionStatus.CACHED if svc_response.cached
-                            else PredictionStatus.SUCCESS,
-            prediction    = svc_response.prediction,
-            cached        = svc_response.cached,
-            latency_ms    = round(latency_ms, 2),
-            explanations={
-                "sensitivity":    sensitivity,
-                "counterfactual": counterfactual,
-                "manifold_risk":  risk,
-            }
+        service_request = PredictionRequest(
+            features=request.features,
+            model_name=request.model_name,
+            request_id=str(request.request_id),
+            trace_id=request.trace.trace_id,
+            include_explanations=bool(request.include_explanations),
         )
- 
-    
-    except ValueError as ve:
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        logger.warning(
-            "inference_validation_failed",
+
+        
+        response = await service.predict(service_request)
+
+        latency = (time.perf_counter() - start_time) * 1000
+
+        logger.info(
+            "prediction_success",
             extra={
                 "request_id": str(request.request_id),
-                "error":      str(ve),
-                "trace_id":   request.trace.trace_id,
+                "latency_ms": round(latency, 2),
+                "cached": response.cached,
+            },
+        )
+
+        return response
+
+   
+    except ValueError as e:
+        logger.warning(
+            "validation_error",
+            extra={
+                "request_id": str(request.request_id),
+                "error": str(e),
             },
         )
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,  
-            detail=str(ve),
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
         )
- 
-    except asyncio.TimeoutError as te:
-        latency_ms = (time.perf_counter() - start_time) * 1000
+
+    except asyncio.TimeoutError:
         logger.error(
             "inference_timeout",
-            extra={
-                "request_id": str(request.request_id),
-                "error":      str(te),
-                "latency_ms": round(latency_ms, 2),
-                "trace_id":   request.trace.trace_id,
-            },
+            extra={"request_id": str(request.request_id)},
         )
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Inference timed out. Try again or reduce feature count.",
+            detail="Model inference timed out",
         )
- 
+
     except Exception as e:
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        logger.error(
-            "inference_critical_error",
+        logger.exception(
+            "inference_internal_error",
             extra={
                 "request_id": str(request.request_id),
-                "error_type": type(e).__name__,
-                "error":      str(e),
-                "latency_ms": round(latency_ms, 2),
-                "trace_id":   request.trace.trace_id,
+                "error": str(e),
             },
-            exc_info=True,
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An internal error occurred while processing the prediction.",
+            detail="Internal inference error",
         )
- 
- 
-@router.get(
-    "/health",
-    summary="Service Health Check",
-    description="Pings Redis and PostgreSQL via PredictionService.health(). Used by load balancers.",
-)
-def health(
+
+
+@router.get("/health")
+async def health(
     service: Annotated[PredictionService, Depends(get_prediction_service)],
 ):
-    
-    return service.health()
+    """
+    Checks:
+    - Redis
+    - Postgres
+    - Model Registry
+    """
+    status_map = service.health()
+
+    if not all(status_map.values()):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=status_map,
+        )
+
+    return status_map

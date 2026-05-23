@@ -184,6 +184,12 @@ class ProphetModel:
         for reg in self.extra_regressors:
             if reg not in future_df.columns:
                 raise KeyError(f"Regressor '{reg}' missing from future_df at predict time.")
+            
+        logger.info(
+            "[ProphetModel:%s] future_df nulls:\n%s",
+            self.model_id,
+            future_df.isnull().sum()
+        )
 
         forecast = self._model.predict(future_df)
         logger.info("[ProphetModel:%s] Prediction — %d rows.", self.model_id, len(forecast))

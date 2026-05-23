@@ -47,9 +47,25 @@ class ForecastingMetrics:
         """
         Entry point for batch evaluation. Performs sanity checks before computation.
         """
-        # Ensure numpy arrays and handle potential empty inputs
-        y_true = np.asarray(y_true).flatten()
-        y_pred = np.asarray(y_pred).flatten()
+
+        y_true = np.asarray(y_true).flatten().astype(np.float64)
+        y_pred = np.asarray(y_pred).flatten().astype(np.float64)
+
+        valid_mask = (
+            np.isfinite(y_true)
+            & np.isfinite(y_pred)
+        )
+
+        invalid_rows = len(y_true) - np.sum(valid_mask)
+
+        if invalid_rows > 0:
+            logger.warning(
+                "Dropped %d invalid forecast rows during evaluation.",
+                invalid_rows
+            )
+
+        y_true = y_true[valid_mask]
+        y_pred = y_pred[valid_mask]
 
         if len(y_true) == 0 or len(y_true) != len(y_pred):
             raise ValueError("Input arrays must be non-empty and of equal length.")

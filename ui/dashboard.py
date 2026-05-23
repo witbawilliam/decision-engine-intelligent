@@ -9,9 +9,6 @@ from urllib.parse import quote
 
 API_BASE_URL = "http://api:8000"
 
-# ---------------------------------------------------------------------------
-# HELPERS
-# ---------------------------------------------------------------------------
 def safe_request(method, url, **kwargs):
     try:
         res = requests.request(method, url, timeout=60, **kwargs)
@@ -93,7 +90,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: 
     # 1. NORMALIZE: standardizes "Forecasting" or "Regression" to lowercase
     normalized_prob = prob_type.lower().strip()
 
-    # 2. BASE PAYLOAD
+    
     payload = {
         "idempotency_key": f"{st.session_state['job_id']}_{normalized_prob}",
         "user_id":         "550e8400-e29b-41d4-a716-446655440000",
@@ -103,8 +100,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: 
         "target_column":   target_col,
     }
 
-    # 3. FORECASTING/TEMPORAL LOGIC: Add mandatory time parameters
-    # If the user chose forecasting/temporal, the backend MUST know the time axis.
+    
     if normalized_prob in ["forecasting", "temporal"]:
         
         
@@ -113,10 +109,9 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: 
             return
             
         payload["time_column"] = time_col
-        # Default horizon if not set (e.g., 30 steps ahead)
         payload["forecast_horizon"] = st.session_state.get("forecast_horizon", 30)
 
-    # 4. DISPATCH
+
     print(f"DEBUG: Dispatching {normalized_prob} for {target_col}")
     train_res = safe_request("POST", f"{API_BASE_URL}{endpoint}", json=payload)
 
@@ -125,7 +120,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: 
         st.error(f"Dispatch failed: {err}")
         return
 
-    # 5. STATE MANAGEMENT
+    
     response_data = train_res.json()
     raw_job_id = response_data.get("job_id", payload["idempotency_key"])
     task_id    = quote(raw_job_id, safe="")   
@@ -134,7 +129,7 @@ def dispatch_training(endpoint: str, prob_type: str, target_col: str, time_col: 
     st.session_state["prob_type"]    = normalized_prob
     st.session_state["target_col"]   = target_col
 
-    # 6. POLLING
+    
     st.caption(f"Polling status for `{raw_job_id}` …")
     final = poll_job(task_id)
     
@@ -149,7 +144,7 @@ def show_metrics() -> None:
     metrics = st.session_state["train_status"].get("metrics", {})
     prob    = st.session_state.get("prob_type", "")
 
-    st.subheader("🎯 Model Performance")
+    st.subheader(" Model Performance")
     m1, m2, m3 = st.columns(3)
     if prob == "regression":
         m1.metric("RMSE", metrics.get("rmse", "—"))
@@ -163,14 +158,12 @@ def show_metrics() -> None:
     m3.write(f"**Model:** `{prob}_v1`")
 
 
-# ---------------------------------------------------------------------------
-# PAGE
-# ---------------------------------------------------------------------------
+
 st.set_page_config(page_title="AI Decision Intelligence", layout="wide")
 st.title(" AutoML Decision Dashboard")
 
-# ── 1. UPLOAD ────────────────────────────────────────────────────────────────
-st.header("1. Data Ingestion")
+
+st.header(" Data Ingestion")
 
 uploaded_file = st.file_uploader(
     "Upload Dataset (CSV, Parquet, Excel)", type=["csv", "parquet", "xlsx"]
@@ -215,22 +208,20 @@ if uploaded_file:
             st.error(f"Upload failed (HTTP {res.status_code}): {res.text}")
 
 
-# ── 2. TRAINING ──────────────────────────────────────────────────────────────
+
 st.divider()
-st.header("2. Model Execution & Evaluation")
+st.header(" Model Execution & Evaluation")
 
 if "job_id" not in st.session_state:
     st.info("Upload a dataset first to unlock training.")
 else:
     columns = st.session_state.get("df_columns", [])
 
-    # ── Shared config (target column) ─────────────────────────────────────────
+    
     st.subheader(" Shared Configuration")
 
     if columns:
-        # "— select —" sentinel forces the user to make an explicit choice.
-        # index=0 previously defaulted to the first column (e.g. "Time")
-        # which is almost never the right target — the user must pick it.
+        
         target_col = st.selectbox(
             "Target Column",
             options=[" select a target column "] + columns,
@@ -352,7 +343,7 @@ else:
             st.warning("Select a Date / Time Column before running the forecasting pipeline.")
         else:
 
-            if st.button("▶ Run Forecasting Pipeline", type="primary", key="btn_forecast"):
+            if st.button("Run Forecasting Pipeline", type="primary", key="btn_forecast"):
                 st.session_state["prob_type"]  = "forecasting"
                 st.session_state["target_col"] = target_col
                 dispatch_training("/v1/train/forecast", "forecasting", target_col, time_col=date_col)
@@ -369,7 +360,7 @@ else:
 
 # INSIGHTS & VISUALIZATION
 st.divider()
-st.header("3. Insights & Visualization")
+st.header(" Insights & Visualization")
 
 if uploaded_file:
     df_preview = load_preview(uploaded_file)
@@ -406,7 +397,7 @@ if uploaded_file:
 
 # PREDICTION vs ACTUAL 
 st.divider()
-st.header("4. Prediction vs Actual")
+st.header(" Prediction vs Actual")
 
 if "train_status" not in st.session_state:
     st.info("Run a training pipeline first to generate predictions.")
@@ -446,51 +437,92 @@ else:
                 key="infer_n",
             )
 
-        if st.button("▶ Fetch Predictions", type="primary", key="btn_infer"):
+        if st.button(" Fetch Predictions", type="primary", key="btn_infer"):
+
             sample = df_pred.head(int(infer_n))
 
-            # Read prob_type from the widget key (current selection),
-            # NOT from session_state which may hold a value from a previous run.
-            current_prob = st.session_state.get("prob_type", "regression")
-            infer_payload = {
-                "model_name":    f"{current_prob}_v1",
-                "features":      sample.drop(columns=[infer_target], errors="ignore")
-                                       .to_dict(orient="records"),
-                "request_id":    str(uuid.uuid4()),
-                "pipeline_type": infer_pipeline,
-                "trace":         {"trace_id": str(uuid.uuid4())},
-            }
-            st.caption(f"Sending → `model_name: {current_prob}_v1`  ·  `pipeline_type: {infer_pipeline}`")
+            last_job_id = st.session_state.get("train_job_id")
 
+            
+            if infer_pipeline == "forecasting":
+                model_to_call = f"prophet_{last_job_id}" if last_job_id else "ProphetModel"
+            else:
+                model_to_call = last_job_id if last_job_id else "XGBoostModel"
+
+           
+            features_df = sample.drop(columns=[infer_target], errors="ignore").fillna(0)
+
+            infer_payload = {
+                "model_name": model_to_call,
+                "features": features_df.to_dict(orient="records")[0],  #  FIX: single row inference style
+                "request_id": str(uuid.uuid4()),
+                "include_explanations": False,
+                "trace": {
+                    "trace_id": str(uuid.uuid4())
+                }
+            }
+
+            st.caption(
+                f"Sending → model: `{model_to_call}` | pipeline: `{infer_pipeline.lower()}`"
+            )
+
+            
             with st.spinner("Calling /inference/predict …"):
                 infer_res = safe_request(
-                    "POST", f"{API_BASE_URL}/inference/predict", json=infer_payload
+                    "POST",
+                    f"{API_BASE_URL}/inference/predict",
+                    json=infer_payload
                 )
 
+            # -------------------------------
+            # 4. RESPONSE HANDLING
+            # -------------------------------
             if infer_res and infer_res.status_code == 200:
-                infer_data  = infer_res.json()
-                predictions = infer_data.get("prediction", [])
-                actuals     = (
-                    sample[infer_target].tolist()
-                    if infer_target in sample.columns else []
-                )
 
-                fig_pred = go.Figure()
-                if actuals:
-                    fig_pred.add_trace(go.Scatter(y=actuals, name="Actual"))
-                if predictions:
-                    fig_pred.add_trace(go.Scatter(
-                        y=predictions, name="Predicted", line=dict(dash="dash")
+                infer_data = infer_res.json()
+
+                prediction = infer_data.get("prediction")
+                latency = infer_data.get("latency_ms")
+                model_version = infer_data.get("model_version")
+
+                actual = sample[infer_target].iloc[0] if infer_target in sample.columns else None
+
+                
+                fig = go.Figure()
+
+                if actual is not None:
+                    fig.add_trace(go.Scatter(
+                        y=[actual],
+                        name="Actual",
+                        mode="markers"
                     ))
-                fig_pred.update_layout(
-                    xaxis_title="Sample index",
+
+                if prediction is not None:
+                    fig.add_trace(go.Scatter(
+                        y=[prediction],
+                        name="Predicted",
+                        mode="markers+lines",
+                        line=dict(dash="dash")
+                    ))
+
+                fig.update_layout(
+                    title="Prediction vs Actual (Single Sample)",
+                    xaxis_title="Sample",
                     yaxis_title=infer_target,
                 )
-                st.plotly_chart(fig_pred, width="stretch")
 
-                ia, ib = st.columns(2)
-                ia.metric("Latency (ms)",  infer_data.get("latency_ms",    "—"))
-                ib.metric("Model Version", infer_data.get("model_version", "—"))
+                st.plotly_chart(fig, use_container_width=True)
+
+                
+                col1, col2, col3 = st.columns(3)
+
+                col1.metric("Prediction", prediction)
+                col2.metric("Latency (ms)", latency)
+                col3.metric("Model Version", model_version)
+
+                st.success("Prediction completed successfully!")
 
             elif infer_res:
-                st.error(f"Inference failed (HTTP {infer_res.status_code}): {infer_res.text}")
+                st.error(
+                    f"Inference failed (HTTP {infer_res.status_code}): {infer_res.text}"
+                )

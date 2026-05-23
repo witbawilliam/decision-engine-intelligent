@@ -37,6 +37,8 @@ class PipelineResult:
     artifacts_path: str
     feature_columns: List[str]
     metadata: Dict[str, Any]
+    predictions: Optional[List[float]] = None
+    actual_values: Optional[List[float]] = None
 
 
 class TabularPipeline(BasePipeline):
@@ -92,7 +94,9 @@ class TabularPipeline(BasePipeline):
                 metadata={
                     "problem_type": self.problem_type.name,
                     "is_drifted": self._cached_drift["is_drifted"]
-                }
+                },
+                predictions=self.predictions[:20],  
+                actual_values=self.actual_values[:20]
             )
             
             logger.info(f"Pipeline finished successfully for {model_name}")
@@ -308,6 +312,9 @@ class TabularPipeline(BasePipeline):
 
         result = self.model.predict(test_df.drop(self.target_column))
         predictions = result.predictions
+
+        self.predictions = predictions
+        self.actual_values = self.y_test.tolist()
 
         if self.problem_type == ProblemType.REGRESSION:
                 evaluator = RegressionMetrics()

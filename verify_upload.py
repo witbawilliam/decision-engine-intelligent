@@ -18,9 +18,9 @@ def verify():
     
     print(f"--- S3 Health Check ---")
     if client.ping():
-        print("✅ S3 Connection: SUCCESS")
+        print(" S3 Connection: SUCCESS")
     else:
-        print("❌ S3 Connection: FAILED (Check if MinIO is running on port 9000)")
+        print(" S3 Connection: FAILED (Check if MinIO is running on port 9000)")
         return
 
     prefix = "datasets/witba_123/"
@@ -29,11 +29,11 @@ def verify():
     objects = client.list_objects(prefix=prefix)
     
     if objects:
-        print(f"✅ Found {len(objects)} files:")
+        print(f"Found {len(objects)} files:")
         for obj in objects:
             print(f" - {obj}")
     else:
-        print(f"❓ No files found. Check if the bucket name 'ml-datasets' is correct.")
+        print(f" No files found. Check if the bucket name 'ml-datasets' is correct.")
 
 if __name__ == "__main__":
     verify()

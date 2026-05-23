@@ -127,9 +127,8 @@ class RegressionMetrics:
 
     def _msle(self, y_true: np.ndarray, y_pred: np.ndarray) -> Optional[float]:
         """Mean Squared Logarithmic Error: Useful for targets with exponential growth."""
-                # Fix
         if np.any(y_true < 0):
-            return None  # Truly undefined if ground truth is negative
+            return None  
         if np.any(y_pred < 0):
             logger.warning("MSLE: Negative predictions clamped to 0.")
             y_pred = np.maximum(y_pred, 0)

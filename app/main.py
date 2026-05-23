@@ -41,6 +41,7 @@ from fastapi.security.api_key import APIKeyHeader
 from app.config import get_settings
 from app.middleware import ProductionMiddleware
 from monitoring.health_checks import HealthChecker
+from storage.s3_client import S3Client
 
 from app.api.routes_upload    import router as upload_router
 from app.api.routes_jobs      import router as jobs_router
@@ -66,36 +67,57 @@ _internal_key_header = APIKeyHeader(name="X-Internal-Key", auto_error=False)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-   
-    
-    logger.info(
-        "platform_starting",
-        extra={
-            "app_name":    settings.app_name,
-            "environment": settings.environment,
-            "log_level":   settings.log_level,
-            "version":     "1.0.0",
-        },
-    )
 
-    redis_ok    = HealthChecker.check_redis()["status"]    == "healthy"
+    logger.info("platform_starting")
+
+
+    redis_ok = HealthChecker.check_redis()["status"] == "healthy"
     postgres_ok = HealthChecker.check_database()["status"] == "healthy"
-    s3_ok       = HealthChecker.check_storage()["status"]  == "healthy"
+    s3_ok = HealthChecker.check_storage()["status"] == "healthy"
 
     if not redis_ok:
-        logger.warning("startup_warning: Redis is not reachable")
+        logger.warning("Redis not healthy at startup")
+
     if not postgres_ok:
-        logger.warning("startup_warning: Postgres is not reachable")
+        logger.warning("Postgres not healthy at startup")
+
     if not s3_ok:
-        logger.warning("startup_warning: S3 is not reachable")
+        logger.warning("S3 not healthy at startup")
 
+   
+    from service.prediction_service import PredictionService
+    from core.models.model_registry import ModelRegistry
+    from storage.redis_client import RedisClient
+    from storage.postgres_client import PostgresClient
+
+    s3_client = S3Client(
+        bucket_name=settings.s3.bucket_name,
+        endpoint_url=settings.s3.endpoint_url,
+        access_key=settings.s3.access_key,
+        secret_key=settings.s3.secret_key,
+        region=settings.s3.region,
+    )
+
+    registry = ModelRegistry(s3_client=s3_client)
+    redis = RedisClient()
+    pg = PostgresClient()
+
+    prediction_service = PredictionService(
+        registry=registry,
+        redis=redis,
+        pg=pg,
+    )
+
+    app.state.prediction_service = prediction_service
+    logger.info("prediction_service_initialized")
+
+   
     HealthChecker.mark_startup_complete()
-    logger.info("platform_ready", extra={"event": "startup_complete"})
+    logger.info("platform_ready")
 
-    yield   
+    yield
 
-    
-    logger.info("platform_shutdown", extra={"event": "shutdown_initiated"})
+    logger.info("platform_shutdown")
     shutdown_logging()
 
 
@@ -114,10 +136,6 @@ app = FastAPI(
 )
 
 
-
-# ProductionMiddleware — from middleware.py
-# Adds X-Request-ID, X-Process-Time, structured logging, and catches
-# unhandled exceptions so raw stack traces never reach the client
 app.add_middleware(ProductionMiddleware)
 
 # CORS — configure allowed origins per environment

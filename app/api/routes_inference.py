@@ -25,7 +25,7 @@ def get_prediction_service(request: Request) -> PredictionService:
     "/predict",
     response_model=PredictionResponse,
     status_code=status.HTTP_200_OK,
-    summary="Run ML inference with optional explanations"
+    summary="Run ML inference with optional explanations (manifold, sensitivity, counterfactuals)",
 )
 async def predict(
     request: APIRequest,
@@ -36,13 +36,13 @@ async def predict(
     logger.info(
         "prediction_request_received",
         extra={
-            "request_id": str(request.request_id),
-            "model_name": request.model_name,
+            "request_id":  str(request.request_id),
+            "model_name":  request.model_name,
+            "include_explanations": request.include_explanations,
         },
     )
 
     try:
-       
         service_request = PredictionRequest(
             features=request.features,
             model_name=request.model_name,
@@ -51,7 +51,6 @@ async def predict(
             include_explanations=bool(request.include_explanations),
         )
 
-        
         response = await service.predict(service_request)
 
         latency = (time.perf_counter() - start_time) * 1000
@@ -59,21 +58,25 @@ async def predict(
         logger.info(
             "prediction_success",
             extra={
-                "request_id": str(request.request_id),
-                "latency_ms": round(latency, 2),
-                "cached": response.cached,
+                "request_id":  str(request.request_id),
+                "model_name":  request.model_name,
+                "latency_ms":  round(latency, 2),
+                "cached":      response.cached,
+                "risk_score":  response.risk_score,
+                # FIX: log whether explanations were actually generated so
+                # we can verify the end-to-end flow without guessing.
+                "explanations_returned": response.explanations is not None,
             },
         )
 
         return response
 
-   
     except ValueError as e:
         logger.warning(
             "validation_error",
             extra={
                 "request_id": str(request.request_id),
-                "error": str(e),
+                "error":      str(e),
             },
         )
         raise HTTPException(
@@ -96,7 +99,7 @@ async def predict(
             "inference_internal_error",
             extra={
                 "request_id": str(request.request_id),
-                "error": str(e),
+                "error":      str(e),
             },
         )
         raise HTTPException(
@@ -105,15 +108,17 @@ async def predict(
         )
 
 
-@router.get("/health")
+@router.get(
+    "/health",
+    summary="Check liveness of Redis, Postgres, and Model Registry",
+)
 async def health(
     service: Annotated[PredictionService, Depends(get_prediction_service)],
 ):
     """
-    Checks:
-    - Redis
-    - Postgres
-    - Model Registry
+    FIX: previously called service.health() which didn't exist on
+    PredictionService, causing AttributeError on every health check.
+    The method is now implemented in prediction_service.py.
     """
     status_map = service.health()
 

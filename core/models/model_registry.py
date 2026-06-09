@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import polars as pl
 import logging
 import pickle
 import uuid
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS model_registry (
     metrics       JSONB        NOT NULL DEFAULT '{}',
     parameters    JSONB        NOT NULL DEFAULT '{}',
     artifact_key  TEXT         NOT NULL,
+    training_data_key TEXT,
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     UNIQUE (model_name, version)
 );
@@ -50,6 +52,13 @@ class ModelRegistry:
         self._s3 = s3_client
         self._s3_prefix = s3_prefix.rstrip("/")
         self._ensure_table()
+
+        try:
+            PostgresClient.execute("ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS training_data_key TEXT;")
+            logger.info("Successfully migrated model_registry schema with tracking column.")
+        except Exception as migration_error:
+            logger.warning(f"Migration check completed or skipped: {migration_error}")
+            
     
     def _sanitize(self, obj: Any) -> Any:
         """
@@ -71,6 +80,7 @@ class ModelRegistry:
         metrics: Dict[str, float],
         parameters: Dict[str, Any],
         problem_type: str,
+        training_data_key: str | None = None,
         stage: str = "staging",
     ) -> Dict[str, Any]:
         """
@@ -108,8 +118,8 @@ class ModelRegistry:
             """
             INSERT INTO model_registry
                 (run_id, model_name, version, stage, problem_type,
-                 metrics, parameters, artifact_key, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+                 metrics, parameters, artifact_key, training_data_key, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -121,6 +131,7 @@ class ModelRegistry:
                 json.dumps(clean_metrics),
                 json.dumps(clean_parameters),
                 artifact_key,
+                training_data_key,
                 datetime.utcnow(),
             ),
             returning=True,
@@ -165,6 +176,36 @@ class ModelRegistry:
             },
         )
         return model
+    
+    def load_training_sample(
+        self,
+        model_name: str,
+    ) -> pl.DataFrame:
+        """
+        Load the training sample associated with the
+        production model.
+        """
+
+        metadata = self._resolve_metadata(
+            model_name=model_name,
+            stage="production",
+        )
+
+        training_key = metadata.get("training_data_key")
+
+        if not training_key:
+            raise ValueError(
+                f"No training sample found for model '{model_name}'"
+            )
+
+        response = self._s3._client.get_object(
+            Bucket=self._s3.bucket_name,
+            Key=training_key,
+        )
+
+        data = response["Body"].read()
+
+        return pl.read_parquet(io.BytesIO(data))
 
     def promote(
         self,
@@ -252,6 +293,18 @@ class ModelRegistry:
 
     def _artifact_key(self, model_name: str, version: int) -> str:
         return f"{self._s3_prefix}/{model_name}/v{version}/model.pkl"
+    
+    def _training_sample_key(
+        self,
+        model_name: str,
+        version: int,
+    ) -> str:
+        return (
+            f"{self._s3_prefix}/"
+            f"{model_name}/"
+            f"v{version}/"
+            f"training_sample.parquet"
+        )
 
     def _next_version(self, model_name: str) -> int:
         """Return the next integer version for *model_name* (1-indexed)."""

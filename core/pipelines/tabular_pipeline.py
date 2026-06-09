@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import io
 import logging
 from typing import Dict, Any
 import numpy as np
@@ -445,6 +445,34 @@ class TabularPipeline(BasePipeline):
             k: (None if isinstance(v, float) and np.isnan(v) else v) 
             for k, v in raw_params.items()
         }
+
+        next_version = registry._next_version(model_name)
+
+        training_data_key = (
+            f"{registry_path}/"
+            f"{model_name}/"
+            f"v{next_version}/"
+            f"training_sample.parquet"
+        )
+
+        train_df = pl.from_pandas(self.X_train)
+
+        train_df = train_df.with_columns(
+            pl.Series(self.target_column, self.y_train)
+        )
+
+        buffer = io.BytesIO()
+
+        train_df.write_parquet(buffer)
+
+        buffer.seek(0)
+
+        self.s3_client._client.put_object(
+            Bucket=self.s3_client.bucket_name,
+            Key=training_data_key,
+            Body=buffer.getvalue(),
+            ContentType="application/octet-stream",
+        )
         
         
         registration_result = registry.register(
@@ -453,8 +481,18 @@ class TabularPipeline(BasePipeline):
             metrics=self._cached_metrics,
             parameters=self.model.model.get_params() if hasattr(self.model.model, 'get_params') else {},
             problem_type=self.problem_type.name,
+            training_data_key=training_data_key,
             stage="staging"
         )
 
-        logger.info(f"Model successfully registered: {model_name} v{registration_result['version']}")
+        registry.promote(
+            model_name=model_name,
+            version=registration_result["version"],
+            new_stage="production",
+        )
+
+        registration_result["stage"] = "production"
+
+
+        logger.info(f"Model successfully promoted: {model_name} v{registration_result['version']}")
         return registration_result

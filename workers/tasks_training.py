@@ -329,6 +329,7 @@ def train_temporal_task(self, job_payload: dict) -> TaskResult:
                 )
                 progress.report("training_model", percent=60)
                 result = pipeline.run()
+                pipeline.promote_to_production()
                 progress.report("finalising", percent=90)
 
             PostgresClient.upsert(

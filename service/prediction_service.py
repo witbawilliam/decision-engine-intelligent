@@ -23,126 +23,108 @@ from monitoring.logging_config import get_logger, RequestContext, set_trace_id
 
 logger = get_logger(__name__, component="prediction_service")
 
-
-# -------------------------
-# CONFIG
-# -------------------------
 TIMEOUTS = {
     "model_inference": 10.0,
-    "cache_io": 0.5,
-    "explanations": 10.0,
+    "cache_io":        0.5,
+    "explanations":    30.0,   
 }
 
 
-# -------------------------
-# DATA CONTRACTS
-# -------------------------
 @dataclass
 class PredictionRequest:
-    features: Dict[str, Any]
+    features:   Dict[str, Any]
     model_name: str
-    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    trace_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    request_id: str  = field(default_factory=lambda: str(uuid.uuid4()))
+    trace_id:   str  = field(default_factory=lambda: str(uuid.uuid4()))
     include_explanations: bool = False
+
+    lever_col:   Optional[str]   = None   
+    target_goal: Optional[float] = None   
+    lever_min:   Optional[float] = None   
+    lever_max:   Optional[float] = None   
 
 
 @dataclass
 class PredictionResponse:
-    request_id: str
-    model_name: str
-    prediction: Any
+    request_id:    str
+    model_name:    str
+    prediction:    Any
     model_version: str
-    risk_score: float
-    latency_ms: float
-    cached: bool = False
-    explanations: Optional[Dict[str, Any]] = None
-    trace_id: str = ""
+    risk_score:    float
+    latency_ms:    float
+    cached:        bool                    = False
+    explanations:  Optional[Dict[str, Any]] = None
+    trace_id:      str                     = ""
 
 
-# -------------------------
-# SERVICE
-# -------------------------
 class PredictionService:
 
-    def __init__(
-        self,
-        registry: ModelRegistry,
-        redis: RedisClient,
-        pg: PostgresClient,
-    ):
+    def __init__(self, registry: ModelRegistry, redis: RedisClient, pg: PostgresClient):
         self.registry = registry
-        self.redis = redis
-        self.pg = pg
-
-        self._model_cache: Dict[str, Any] = {}
+        self.redis    = redis
+        self.pg       = pg
+        self._model_cache: Dict[str, Any]           = {}
         self._guard_cache: Dict[str, ManifoldGuard] = {}
 
-    # -------------------------
-    # MAIN ENTRY
-    # -------------------------
+   
     async def predict(self, request: PredictionRequest) -> PredictionResponse:
         set_trace_id(request.trace_id)
         start = time.perf_counter()
 
         with RequestContext(trace_id=request.trace_id):
 
-            # 1. cache lookup
             cache_key = self._make_cache_key(request.features, request.model_name)
-            cached = await self._cache_get(cache_key)
+            cached    = await self._cache_get(cache_key)
             if cached:
+                # If explanations were requested but not in the root cache entry, 
+                # we can optionally fetch them, but for now fallback smoothly
                 return self._build_response(request, cached, start, cached=True)
 
-            # 2. load model (cached in memory)
             model, version = self._get_model(request.model_name)
+            X              = pl.DataFrame([request.features])
+            
+            # Keep calculations concurrent where possible
+            risk_score     = await self._risk_score(request.model_name, X)
+            prediction     = await self._predict(model, X)
 
-            # 3. transform input
-            X = pl.DataFrame([request.features])
-
-            # 4. risk / OOD check
-            risk_score = await self._risk_score(request.model_name, X)
-
-            # 5. inference
-            prediction = await self._predict(model, X)
-
-            result = {
+            result: Dict[str, Any] = {
                 "prediction":    self._extract(prediction),
                 "model_version": str(version),
                 "risk_score":    risk_score,
-                "explanations":  None,   # populated below if requested
+                "explanations":  None,
             }
 
-            # 6. async side effects (non-blocking)
+            # Run explanations BEFORE setting cache if requested inline
+            if request.include_explanations:
+                result["explanations"] = await self._run_explanations(
+                    model, request, X
+                )
+
+            # Fire off background I/O tasks completely safely
             asyncio.create_task(self._cache_set(cache_key, result))
             asyncio.create_task(self._audit(request, result, start))
 
-            # 7. explanations — run inline when requested so the caller
-            #    receives the results in the same response, rather than
-            #    silently caching them in a fire-and-forget task.
-            #
-            #    FIX: was `asyncio.create_task(self._run_explanations(...))`
-            #    which meant the response always had explanations=None.
-            if request.include_explanations:
-                explanations = await self._run_explanations(model, request, X)
-                result["explanations"] = explanations
-
             return self._build_response(request, result, start)
 
-    # -------------------------
-    # MODEL LOADING (CACHED)
-    # -------------------------
+
     def _get_model(self, model_name: str):
-        if model_name in self._model_cache:
-            return self._model_cache[model_name]
+        if model_name not in self._model_cache:
+            model = self.registry.load(
+                model_name=model_name,
+                stage="production"
+            )
 
-        model   = self.registry.load_model(model_name)
-        version = self.registry.get_latest_version(model_name)
+            metadata = self.registry.list_versions(
+                model_name=model_name,
+                stage="production"
+            )[0]
 
-        self._model_cache[model_name] = (model, version)
-        return model, version
+            version = metadata["version"]
+            self._model_cache[model_name] = (model, version)
 
-    # -------------------------
-    # PREDICTION
-    # -------------------------
+        return self._model_cache[model_name]
+
+
     async def _predict(self, model: Any, X: pl.DataFrame):
         loop = asyncio.get_running_loop()
         return await asyncio.wait_for(
@@ -150,54 +132,105 @@ class PredictionService:
             timeout=TIMEOUTS["model_inference"],
         )
 
-    # -------------------------
-    # RISK / MANIFOLD
-    # -------------------------
+
     async def _risk_score(self, model_name: str, X: pl.DataFrame) -> float:
+        # Offload fitting the guard sample from S3/DB to an executor thread 
+        # to prevent blocking if a model is accessed for the first time.
         if model_name not in self._guard_cache:
-            guard    = ManifoldGuard()
-            training = self.registry.load_training_sample(model_name)
-            guard.fit(training)
-            self._guard_cache[model_name] = guard
-
-        return self._guard_cache[model_name].get_risk_score(X)
-
-    # -------------------------
-    # EXPLANATIONS
-    # -------------------------
-    async def _run_explanations(
-        self, model, request: PredictionRequest, X: pl.DataFrame
-    ) -> Optional[Dict[str, Any]]:
-        """
-        FIX: now returns the explanations dict instead of fire-and-forgetting
-        them into Redis.  The caller decides what to do with the result.
-        Redis caching is still done as a side-effect for subsequent lookups.
-        """
-        try:
-            analyzer = SensitivityAnalyzer(model)
-            training = self.registry.load_training_sample(request.model_name)
-            cf       = CounterfactualOrchestrator(model, training)
-
             loop = asyncio.get_running_loop()
+            def _init_guard():
+                guard = ManifoldGuard()
+                training = self.registry.load_training_sample(model_name)
+                guard.fit(training)
+                return guard
+            
+            self._guard_cache[model_name] = await loop.run_in_executor(None, _init_guard)
+            
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._guard_cache[model_name].get_risk_score, X)
 
-            sens_task = loop.run_in_executor(None, analyzer.analyze, X)
-            cf_task   = loop.run_in_executor(None, cf.explain, X)
+    
 
-            sens, counterfactual = await asyncio.wait_for(
-                asyncio.gather(sens_task, cf_task),
+    async def _run_explanations(
+        self,
+        model,
+        request: PredictionRequest,
+        X: pl.DataFrame,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            loop         = asyncio.get_running_loop()
+            
+            # Load training samples inside executor thread
+            training     = await loop.run_in_executor(None, self.registry.load_training_sample, request.model_name)
+            analyzer     = SensitivityAnalyzer(model)
+            cf_orch      = CounterfactualOrchestrator(model, training)
+            guard        = self._guard_cache.get(request.model_name)
+
+            # Build task tracking arrays structurally 
+            tasks = []
+            tasks.append(loop.run_in_executor(None, analyzer.analyze, X))
+            
+            cf_enabled = (
+                request.lever_col
+                and request.target_goal is not None
+                and request.lever_min   is not None
+                and request.lever_max   is not None
+                and request.lever_col in X.columns
+            )
+
+            if cf_enabled:
+                bounds = (float(request.lever_min), float(request.lever_max))
+                tasks.append(loop.run_in_executor(
+                    None,
+                    cf_orch.explain_how_to_hit_target,
+                    X,
+                    float(request.target_goal),
+                    request.lever_col,
+                    bounds,
+                ))
+
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True),
                 timeout=TIMEOUTS["explanations"],
             )
 
+            # 🔧 FIX: Safely unpack by popping list indexes instead of hardcoded assignment
+            sens_result = results[0]
+            cf_result   = results[1] if cf_enabled else None
+
+            sensitivity_payload = None
+            if isinstance(sens_result, Exception):
+                logger.warning("sensitivity_failed", extra={"error": str(sens_result)})
+            else:
+                sensitivity_payload = sens_result.model_dump() if hasattr(sens_result, "model_dump") else sens_result
+
+            counterfactual_payload = None
+            if cf_enabled and cf_result is not None:
+                if isinstance(cf_result, Exception):
+                    logger.warning("counterfactual_failed", extra={"error": str(cf_result)})
+                else:
+                    counterfactual_payload = cf_result.model_dump() if hasattr(cf_result, "model_dump") else cf_result
+
+            manifold_payload = None
+            if guard is not None:
+                try:
+                    manifold_payload = {
+                        "risk_score":       guard.get_risk_score(X),
+                        "feature_count":    guard._feature_count,
+                        "numeric_columns":  guard._numeric_columns,
+                    }
+                except Exception as e:
+                    logger.warning("manifold_detail_failed", extra={"error": str(e)})
+
             payload = {
-                "sensitivity":    getattr(sens,           "model_dump", lambda: sens)(),
-                "counterfactual": getattr(counterfactual, "model_dump", lambda: counterfactual)(),
+                "sensitivity":    sensitivity_payload,
+                "counterfactual": counterfactual_payload,
+                "manifold":       manifold_payload,
             }
 
-            # Side-effect: cache for re-fetch by request_id
             asyncio.create_task(
                 self._cache_set(f"exp:{request.request_id}", payload)
             )
-
             return payload
 
         except asyncio.TimeoutError:
@@ -207,9 +240,7 @@ class PredictionService:
             logger.error("explanation_failed", extra={"error": str(e)})
             return None
 
-    # -------------------------
-    # CACHE
-    # -------------------------
+
     async def _cache_get(self, key: str) -> Optional[Dict]:
         try:
             loop = asyncio.get_running_loop()
@@ -221,13 +252,10 @@ class PredictionService:
         except Exception:
             return None
 
+
     async def _cache_set(self, key: str, value: Dict) -> None:
-        """
-        FIX: was creating an executor future but not awaiting it, so
-        `setex` was never actually called.
-        """
         try:
-            serialised = json.dumps(value, default=str)   # default=str handles datetime etc.
+            serialised = json.dumps(value, default=str)
             loop       = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(None, self.redis.setex, key, 300, serialised),
@@ -236,59 +264,39 @@ class PredictionService:
         except Exception as e:
             logger.warning("cache_set_failed", extra={"error": str(e)})
 
-    # -------------------------
-    # AUDIT
-    # -------------------------
+    
+
     async def _audit(self, request: PredictionRequest, result: Dict, start: float) -> None:
         try:
-            latency = (time.perf_counter() - start) * 1000
-            record  = {
+            # 🔧 FIX: Execute the synchronous Postgres client call on an executor thread 
+            # to prevent blocking the async loop worker
+            loop = asyncio.get_running_loop()
+            record = {
                 "request_id": request.request_id,
                 "model_name": request.model_name,
                 "prediction": str(result["prediction"]),
-                "latency_ms": latency,
+                "latency_ms": (time.perf_counter() - start) * 1000,
                 "timestamp":  datetime.now(timezone.utc),
             }
-            self.pg.insert("prediction_audit", record)
+            await loop.run_in_executor(None, self.pg.insert, "prediction_audit", record)
         except Exception as e:
             logger.error("audit_failed", extra={"error": str(e)})
 
-    # -------------------------
-    # HEALTH
-    # -------------------------
+
     def health(self) -> Dict[str, bool]:
-        """
-        FIX: method was missing — routes_inference.py calls service.health()
-        which raised AttributeError on every /inference/health request.
-        """
-        status: Dict[str, bool] = {
-            "redis":    False,
-            "postgres": False,
-            "registry": False,
-        }
-        try:
-            self.redis.ping()
-            status["redis"] = True
-        except Exception as e:
-            logger.warning("health_redis_failed", extra={"error": str(e)})
+        out = {"redis": False, "postgres": False, "registry": False}
+        for name, fn in [
+            ("redis",    lambda: self.redis.ping()),
+            ("postgres", lambda: self.pg.ping()),
+            ("registry", lambda: self.registry.ping()),
+        ]:
+            try:
+                fn(); out[name] = True
+            except Exception as e:
+                logger.warning(f"health_{name}_failed", extra={"error": str(e)})
+        return out
 
-        try:
-            self.pg.ping()
-            status["postgres"] = True
-        except Exception as e:
-            logger.warning("health_postgres_failed", extra={"error": str(e)})
 
-        try:
-            self.registry.ping()
-            status["registry"] = True
-        except Exception as e:
-            logger.warning("health_registry_failed", extra={"error": str(e)})
-
-        return status
-
-    # -------------------------
-    # HELPERS
-    # -------------------------
     def _make_cache_key(self, features: Dict, model_name: str) -> str:
         raw = json.dumps(features, sort_keys=True, default=str)
         return f"{model_name}:{hashlib.sha256(raw.encode()).hexdigest()}"
@@ -296,18 +304,10 @@ class PredictionService:
     def _extract(self, prediction: Any) -> Any:
         return prediction[0] if hasattr(prediction, "__len__") else prediction
 
-    def _build_response(
-        self,
-        request: PredictionRequest,
-        data: Dict,
-        start: float,
-        cached: bool = False,
-    ) -> PredictionResponse:
+    def _build_response(self, request, data, start, cached=False) -> PredictionResponse:
         return PredictionResponse(
             request_id=request.request_id,
             model_name=request.model_name,
-            # FIX: use .get() with defaults so a partial/stale cache entry
-            # never causes a KeyError.
             prediction=data.get("prediction"),
             model_version=data.get("model_version", "unknown"),
             risk_score=data.get("risk_score", 0.0),

@@ -93,6 +93,7 @@ class TemporalPipelineConfig:
         self.min_quality_score           = min_quality_score
         self.max_drift_score             = max_drift_score
         self.registry_path               = registry_path
+        self.is_fitted = False
         self.auto_register               = auto_register
 
 
@@ -110,6 +111,7 @@ class TemporalPipeline(BasePipeline):
         self._feature_engineering()
         self._split()
         self._train()
+        self.is_fitted = True
         if self.config.run_backtest:
             self._run_backtesting()
         metrics = self._evaluate_final()

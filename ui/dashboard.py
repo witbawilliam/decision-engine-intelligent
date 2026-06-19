@@ -635,40 +635,148 @@ else:
                     f"[{lever_min:.2f}, {lever_max:.2f}] to hit prediction = {target_goal:.2f}"
                 )
 
-        # ── FETCH ─────────────────────────────────────────────────────────────
-        if st.button("▶ Fetch Predictions", type="primary", key="btn_infer"):
+        # ── FETCH 
+        if st.button(" Fetch Predictions", type="primary"):
 
-            sample      = df_pred.head(int(infer_n))
-            features_df = sample.drop(columns=[infer_target], errors="ignore").fillna(0)
-            rows        = features_df.to_dict(orient="records")
+            sample = df_pred.head(int(infer_n))
 
-            st.caption(
-                f"Sending → model: `{resolved_model}` | "
-                f"pipeline: `{infer_pipeline}` | rows: {len(rows)}"
+            features_df = (
+                sample
+                .drop(columns=[infer_target], errors="ignore")
+                .fillna(0)
             )
 
-            predictions, actuals, latencies = [], [], []
-            progress_bar = st.progress(0, text="Running inference…")
+            rows = features_df.to_dict(orient="records")
 
-            for i, row in enumerate(rows):
+            st.caption(
+                f"Model: `{resolved_model}` | "
+                f"Rows: {len(rows)}"
+            )
 
-                # 🔧 FIX: Flatten the payload architecture to match API contract properties cleanly
-                payload: dict = {
+            predictions = []
+            actuals = []
+            latencies = []
+            explanations = []
+
+            progress = st.progress(0)
+
+            for idx, row in enumerate(rows):
+
+                payload = {
                     "model_name":           resolved_model,
                     "features":             sanitize_row(row),
-                    "request_id":           str(uuid.uuid4()),
-                    "trace_id":             str(uuid.uuid4()), # Flat trace property
-                    "include_explanations": bool(include_explanations),
+                    "include_explanations": include_explanations,
+                    # Counterfactual lever controls — only sent when set
+                    "lever_col":            lever_col   if lever_col   else None,
+                    "target_goal":          float(target_goal) if lever_col and target_goal is not None else None,
+                    "lever_min":            float(lever_min)   if lever_col and lever_min   is not None else None,
+                    "lever_max":            float(lever_max)   if lever_col and lever_max   is not None else None,
                 }
 
-                # Attach counterfactual controls when lever is configured
-                if include_explanations and lever_col:
-                    payload["lever_col"]   = lever_col
-                    payload["target_goal"] = float(target_goal)
-                    payload["lever_min"]   = float(lever_min)
-                    payload["lever_max"]   = float(lever_max)
-
-                infer_res = safe_request(
-                    "POST", f"{API_BASE_URL}/inference/predict", json=payload
+                response = safe_request(
+                    "POST",
+                    f"{API_BASE_URL}/v1/inference/predict",
+                    json=payload,
                 )
-                progress_bar.progress((i + 1) / len(rows), text=f"Row {i+1}/{len(rows)}")
+
+                if response and response.status_code == 200:
+
+                    data = response.json()
+
+                    predictions.append(data.get("prediction"))
+                    latencies.append(data.get("latency_ms", 0))
+
+                    actuals.append(
+                        sample.iloc[idx].get(infer_target)
+                    )
+
+                    explanations.append(
+                        data.get("explanations", {})
+                    )
+
+                else:
+                    predictions.append(None)
+                    actuals.append(None)
+                    latencies.append(0)
+                    explanations.append(None)
+
+                progress.progress((idx + 1) / len(rows))
+
+            progress.empty()
+
+            st.success("Inference completed")
+
+            summary_df = pd.DataFrame({
+                "Actual": actuals,
+                "Prediction": predictions,
+                "Latency (ms)": latencies,
+            })
+
+            st.dataframe(summary_df, width="stretch")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Rows Processed",
+                len(predictions)
+            )
+
+            col2.metric(
+                "Average Latency",
+                f"{np.mean(latencies):.2f} ms"
+            )
+
+            col3.metric(
+                "Model",
+                resolved_model
+            )
+
+            fig = go.Figure()
+
+            fig.add_trace(
+                go.Scatter(
+                    y=actuals,
+                    mode="lines+markers",
+                    name="Actual"
+                )
+            )
+
+            fig.add_trace(
+                go.Scatter(
+                    y=predictions,
+                    mode="lines+markers",
+                    name="Prediction"
+                )
+            )
+
+            fig.update_layout(
+                title="Prediction vs Actual",
+                height=400,
+            )
+
+            st.plotly_chart(fig, width="stretch")
+
+            if include_explanations:
+
+                st.markdown(" Decision Intelligence")
+
+                # Build full response dicts so render_explanation_panel
+                # can access both top-level risk_score and nested explanations
+                full_responses = []
+                for idx in range(len(predictions)):
+                    full_responses.append({
+                        "prediction":   predictions[idx],
+                        "risk_score":   (explanations[idx] or {}).get("manifold", {}).get("risk_score", 0.0)
+                                        if explanations[idx] else 0.0,
+                        "explanations": explanations[idx],
+                    })
+
+                for idx, response_data in enumerate(full_responses):
+                    if not response_data.get("explanations"):
+                        continue
+                    render_explanation_panel(
+                        response_data,
+                        idx,
+                        infer_target,
+                        numeric_cols,
+                    )

@@ -142,7 +142,8 @@ class TemporalPipeline(BasePipeline):
             "artifacts_key": self._registry_metadata.get("artifact_key", self.config.registry_path),
             "feature_columns": self.features,
             "model_version": semver,
-            "backtest_summary": self._backtest_summary
+            "backtest_summary": self._backtest_summary,
+            "predictions": self._prediction_results
             },
 
             metadata=metadata
@@ -180,6 +181,7 @@ class TemporalPipeline(BasePipeline):
         self._backtest_summary: Dict[str, Any] = {}
         self._drift_report: Any = None
         self._registry_metadata: Dict[str, Any] = {}
+        self._prediction_results = []
         
         self._registry = ModelRegistry(
         base_path=self.config.registry_path,
@@ -395,6 +397,21 @@ class TemporalPipeline(BasePipeline):
         y_true = self._test_df[self.target_column].to_numpy()
         y_pred = self._forecast_result.yhat[: len(y_true)]
         y_train = self._train_df[self.target_column].to_numpy()
+
+        dates = self._test_df[self.datetime_column].to_list()
+
+
+
+        self._prediction_results = [
+            {
+                "date": str(date),
+                "actual": float(actual),
+                "predicted": float(predicted)
+            }
+
+            for date, actual, predicted in zip(dates, y_true, y_pred)
+        ]
+
 
         metric_result = self._metrics_engine.evaluate(
             y_true  = y_true,

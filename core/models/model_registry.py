@@ -5,6 +5,7 @@ import polars as pl
 import logging
 import pickle
 import uuid
+import re  # Added for production string parsing
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -33,15 +34,48 @@ CREATE TABLE IF NOT EXISTS model_registry (
 );
 """
 
+_CREATE_PREDICTION_AUDIT_SQL = """
+CREATE TABLE IF NOT EXISTS prediction_audit (
+    id SERIAL PRIMARY KEY,
+
+    request_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_version TEXT,
+
+    features JSONB,
+
+    prediction TEXT,
+    risk_score DOUBLE PRECISION,
+
+    latency_ms DOUBLE PRECISION,
+
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+_CREATE_PREDICTION_FILES_SQL = """
+CREATE TABLE IF NOT EXISTS prediction_files (
+    id SERIAL PRIMARY KEY,
+
+    job_id TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    model_version TEXT,
+
+    prediction_file_key TEXT NOT NULL,
+
+    row_count INTEGER,
+
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
+
 
 class ModelRegistry:
    
-
     def __init__(
         self,
         s3_client: Optional[S3Client] = None,
         s3_prefix: str = "ml_registry",
-        
         base_path: str = "ml_registry",
     ) -> None:
         if s3_client is None:
@@ -59,11 +93,8 @@ class ModelRegistry:
         except Exception as migration_error:
             logger.warning(f"Migration check completed or skipped: {migration_error}")
             
-    
     def _sanitize(self, obj: Any) -> Any:
-        """
-        Recursively replace NaN or Infinity with None for JSON compliance.
-        """
+        """Recursively replace NaN or Infinity with None for JSON compliance."""
         if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
             return None
         if isinstance(obj, dict):
@@ -71,7 +102,27 @@ class ModelRegistry:
         if isinstance(obj, list):
             return [self._sanitize(x) for x in obj]
         return obj
-    
+
+    def _parse_registration_path(self, model_name: str, training_data_key: str | None) -> tuple[str, str | None]:
+        if "datasets/" in model_name or "prophet_datasets/" in model_name:
+            match = re.search(r"^(.*\.parquet)", model_name)
+            extracted_key = match.group(1) if match else model_name.split(".parquet")[0] + ".parquet"
+
+            suffix = model_name.split(".parquet_")[-1] if ".parquet_" in model_name else "model"
+
+            file_base_name = extracted_key.split("/")[-1].replace(".parquet", "")
+            
+            if len(file_base_name) > 25:  
+                clean_name = f"auto_{suffix}_model"
+            else:
+                clean_name = f"{file_base_name}_{suffix}"
+
+            if not training_data_key:
+                training_data_key = extracted_key
+
+            return clean_name, training_data_key
+
+        return model_name, training_data_key
 
     def register(
         self,
@@ -85,10 +136,10 @@ class ModelRegistry:
     ) -> Dict[str, Any]:
         """
         Serialize *model*, upload it to S3, and record metadata in Postgres.
-
-        Returns
-        The metadata dict for the new version (mirrors the DB row).
         """
+        # Parse inputs to isolate human-readable names from data URI structures
+        model_name, training_data_key = self._parse_registration_path(model_name, training_data_key)
+
         clean_metrics = self._sanitize(metrics)
         clean_parameters = self._sanitize(parameters)
 
@@ -113,7 +164,7 @@ class ModelRegistry:
             extra={"bucket": self._s3.bucket_name, "key": artifact_key},
         )
 
-        #  Persist metadata to Postgres 
+        # Persist metadata to Postgres 
         row = PostgresClient.execute(
             """
             INSERT INTO model_registry
@@ -149,14 +200,7 @@ class ModelRegistry:
         version: Optional[int] = None,
         stage: Optional[str] = None,
     ) -> Any:
-        """
-        Download a model artifact from S3 and deserialize it.
-
-        Resolution order (most-specific wins):
-        1. *model_name* + *version*  → exact match
-        2. *model_name* + *stage*    → latest version in that stage
-        3. *model_name* only         → latest version overall
-        """
+        """Download a model artifact from S3 and deserialize it."""
         meta = self._resolve_metadata(model_name, version=version, stage=stage)
         artifact_key: str = meta["artifact_key"]
 
@@ -181,11 +225,7 @@ class ModelRegistry:
         self,
         model_name: str,
     ) -> pl.DataFrame:
-        """
-        Load the training sample associated with the
-        production model.
-        """
-
+        """Load the training sample associated with the production model."""
         metadata = self._resolve_metadata(
             model_name=model_name,
             stage="production",
@@ -204,7 +244,6 @@ class ModelRegistry:
         )
 
         data = response["Body"].read()
-
         return pl.read_parquet(io.BytesIO(data))
 
     def promote(
@@ -213,11 +252,7 @@ class ModelRegistry:
         version: int,
         new_stage: str,
     ) -> None:
-        """
-        Update the *stage* of a specific model version in Postgres.
-
-        Raises ``ValueError`` if the (model_name, version) pair does not exist.
-        """
+        """Update the *stage* of a specific model version in Postgres."""
         result = PostgresClient.execute(
             """
             UPDATE model_registry
@@ -242,11 +277,7 @@ class ModelRegistry:
         model_name: str,
         stage: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
-        """
-        Return all registered versions of *model_name*, newest first.
-
-        Optionally filter by *stage*.
-        """
+        """Return all registered versions of *model_name*, newest first."""
         if stage:
             rows = PostgresClient.query(
                 """
@@ -281,15 +312,16 @@ class ModelRegistry:
             "postgres": PostgresClient.ping(),
             "s3": self._s3.ping(),
         }
-
     
     # Internal helpers
-    
 
     def _ensure_table(self) -> None:
-        """Create the ``model_registry`` table if it does not already exist."""
         PostgresClient.execute(_CREATE_TABLE_SQL)
+        PostgresClient.execute(_CREATE_PREDICTION_AUDIT_SQL)
+        PostgresClient.execute(_CREATE_PREDICTION_FILES_SQL)
+
         logger.debug("model_registry table ensured")
+        logger.debug("prediction_audit table ensured")
 
     def _artifact_key(self, model_name: str, version: int) -> str:
         return f"{self._s3_prefix}/{model_name}/v{version}/model.pkl"
@@ -321,14 +353,7 @@ class ModelRegistry:
         version: Optional[int] = None,
         stage: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Look up a single metadata row from Postgres.
-
-        Resolution order:
-        1. Exact (model_name, version)
-        2. Latest version in *stage*
-        3. Overall latest version
-        """
+        """Look up a single metadata row from Postgres."""
         if version is not None:
             rows = PostgresClient.query(
                 "SELECT * FROM model_registry "

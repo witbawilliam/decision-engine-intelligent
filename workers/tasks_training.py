@@ -88,6 +88,7 @@ def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
     payload["status"] = STATUS_SUCCESS
     payload["model_name"] = result.model_name      
     payload["artifacts_path"] = getattr(result, "artifacts_path", "models/default_path.pkl")
+    payload["predictions"] = result.artifacts["predictions"]
     return payload
 
 

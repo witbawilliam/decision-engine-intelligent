@@ -5,34 +5,39 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-
 from feedback.feedback_service import FeedbackService
-
-
 from feedback.error_logger import ErrorLogger
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/feedback",
-    tags=["Feedback"],
+    tags=["Feedback Engine"],
 )
+
+
+def normalize_model_identifier(model_name: str) -> str:
+    """
+    Ensures input strings from tracking paths are transformed into the clean
+    database-compatible identifier before writing metrics.
+    """
+    normalized = model_name
+    if "/" in model_name or ".parquet" in model_name:
+        normalized = model_name.split("/")[-1]
+        normalized = normalized.replace(".parquet_", "_")
+        normalized = normalized.replace(".parquet", "")
+    return normalized
 
 
 
 
 class FeedbackRequest(BaseModel):
     """
-    Body for POST /feedback/.
-
-    Fields map to FeedbackService.store_feedback() parameters:
-        model_name  → model_id
-        metadata    → input_data
-        actual      → actual_value
+    Body structure for incoming ground-truth feedback payloads.
     """
-    model_name: str                      = Field(..., min_length=1, max_length=128)
+    model_name: str                      = Field(..., min_length=1, max_length=128, example="auto_regression_model")
     prediction: float                    = Field(..., description="Value the model predicted.")
     actual:     float                    = Field(..., description="Real observed value.")
     metadata:   Optional[Dict[str, Any]] = Field(
@@ -42,7 +47,7 @@ class FeedbackRequest(BaseModel):
 
 
 class FeedbackResponse(BaseModel):
-    """Response returned after POST /feedback/."""
+    """Validated API response containing calculated performance statistics."""
     feedback_id:    str
     model_name:     str
     prediction:     float
@@ -55,16 +60,25 @@ class FeedbackResponse(BaseModel):
 
 
 
+_feedback_service_instance: Optional[FeedbackService] = None
+
+def get_feedback_service() -> FeedbackService:
+    global _feedback_service_instance
+    if _feedback_service_instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Feedback collection service is uninitialized."
+        )
+    return _feedback_service_instance
+
+
+# --- UTILITY HELPERS ---
 
 def _compute_metrics(prediction: float, actual: float) -> dict[str, float | None]:
-    """
-    Computes regression error metrics.
-    Called before FeedbackService.store_feedback() so metrics are available
-    in both the response body and any downstream monitoring.
-    """
+    """Computes regression error metrics cleanly for downstream dashboards."""
     abs_error = abs(prediction - actual)
     sq_error  = (prediction - actual) ** 2
-    rel_error: float | None = abs_error / abs(actual) if actual != 0 else None
+    rel_error = abs_error / abs(actual) if actual != 0 else None
     return {
         "absolute_error": abs_error,
         "squared_error":  sq_error,
@@ -77,11 +91,12 @@ def _build_response(
     payload:     FeedbackRequest,
     metrics:     dict[str, Any],
     recorded_at: datetime,
+    clean_name:  str,
 ) -> FeedbackResponse:
-    """Constructs the FeedbackResponse from the stored payload and computed metrics."""
+    """Constructs the FeedbackResponse object output."""
     return FeedbackResponse(
         feedback_id    = feedback_id,
-        model_name     = payload.model_name,
+        model_name     = clean_name,
         prediction     = payload.prediction,
         actual         = payload.actual,
         absolute_error = metrics["absolute_error"],
@@ -99,46 +114,24 @@ def _build_response(
     response_model=FeedbackResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Submit model-prediction feedback",
-    description=(
-        "Records ground-truth actuals against model predictions. "
-        "Stored in postgres model_feedback table for drift monitoring and retraining."
-    ),
+    description="Records ground-truth actual values against previous predictions for drift monitoring.",
 )
 async def submit_feedback(
     request: Request,
     payload: FeedbackRequest,
+    service: FeedbackService = Depends(get_feedback_service)
 ) -> FeedbackResponse:
-    """
-    Connection map
     
-    FeedbackRequest  (inline Pydantic — no job_schema)
-        validates model_name, prediction, actual, metadata
-
-    _compute_metrics(prediction, actual)
-        absolute_error, squared_error, relative_error
-
-    FeedbackService.store_feedback()          ← feedback_service.py
-         model_id     = payload.model_name
-         input_data   = payload.metadata or {}
-         prediction   = payload.prediction
-         actual_value = payload.actual
-         PostgresClient.insert("model_feedback", record)
-
-    ErrorLogger.log_error()                   ← error_logger.py
-         called on any exception
-         component = "routes_feedback/submit"
-         context includes feedback_id, model_name, prediction, actual
-    """
     feedback_id = str(uuid.uuid4())
     recorded_at = datetime.now(tz=timezone.utc)
+    clean_model_name = normalize_model_identifier(payload.model_name)
 
     try:
-        
         metrics = _compute_metrics(payload.prediction, payload.actual)
 
         
-        FeedbackService.store_feedback(
-            model_id     = payload.model_name,
+        service.store_feedback(
+            model_id     = clean_model_name,
             input_data   = payload.metadata or {},
             prediction   = payload.prediction,
             actual_value = payload.actual,
@@ -148,23 +141,21 @@ async def submit_feedback(
             "feedback_recorded",
             extra={
                 "feedback_id":    feedback_id,
-                "model_name":     payload.model_name,
+                "model_name":     clean_model_name,
                 "absolute_error": round(metrics["absolute_error"], 6),
                 "client":         request.client.host if request.client else "unknown",
             },
         )
 
-        
-        return _build_response(feedback_id, payload, metrics, recorded_at)
+        return _build_response(feedback_id, payload, metrics, recorded_at, clean_model_name)
 
     except Exception as exc:
-        
         ErrorLogger.log_error(
             component = "routes_feedback/submit",
             error     = exc,
             context   = {
                 "feedback_id": feedback_id,
-                "model_name":  payload.model_name,
+                "model_name":  clean_model_name,
                 "prediction":  payload.prediction,
                 "actual":      payload.actual,
             },
@@ -175,38 +166,26 @@ async def submit_feedback(
         ) from exc
 
 
-
-
 @router.get(
     "/{model_name}",
     response_model=List[Dict[str, Any]],
     status_code=status.HTTP_200_OK,
     summary="Retrieve feedback for a model",
-    description=(
-        "Returns all feedback records for the given model from postgres, "
-        "ordered by timestamp descending. Returns empty list if none exist."
-    ),
+    description="Returns all logged historical performance metrics for a specific production model architecture.",
 )
-async def get_feedback(model_name: str) -> List[Dict[str, Any]]:
-    """
-    Connection map
-
-    model_name path param
-         FeedbackService.get_feedback(model_id=model_name)    feedback_service.py
-             SELECT * FROM model_feedback WHERE model_id = %s
-             returns List[Dict] — empty list is valid, not a 404
-
-    ErrorLogger.log_error()                                       error_logger.py
-         called on any exception
-         component = "routes_feedback/get_feedback"
-    """
+async def get_feedback(
+    model_name: str,
+    service: FeedbackService = Depends(get_feedback_service)
+) -> List[Dict[str, Any]]:
+    
+    clean_model_name = normalize_model_identifier(model_name)
     try:
-        records = FeedbackService.get_feedback(model_id=model_name)
+        records = service.get_feedback(model_id=clean_model_name)
 
         logger.info(
             "feedback_retrieved",
             extra={
-                "model_name":   model_name,
+                "model_name":   clean_model_name,
                 "record_count": len(records),
             },
         )
@@ -217,9 +196,9 @@ async def get_feedback(model_name: str) -> List[Dict[str, Any]]:
         ErrorLogger.log_error(
             component = "routes_feedback/get_feedback",
             error     = exc,
-            context   = {"model_name": model_name},
+            context   = {"model_name": clean_model_name},
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve feedback for model '{model_name}'.",
+            detail=f"Failed to retrieve feedback for model '{clean_model_name}'.",
         ) from exc

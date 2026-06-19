@@ -60,51 +60,63 @@ class TabularPipeline(BasePipeline):
     
 
     def execute_pipeline(self, model_name: str) -> PipelineResult:
-        """
-        The entry point for the pipeline execution.
-        This orchestrates the private methods in the correct order.
-        """
-        logger.info(f"Starting pipeline execution for model: {model_name}")
+            """
+            The entry point for the pipeline execution.
+            This orchestrates the private methods in the correct order.
+            """
+            logger.info(f"Starting pipeline execution for model: {model_name}")
 
-        try:
-            # Execution Flow
-            self._detect_problem_type()
-            self._validate()
-            self._feature_engineering()
-            self._split()
-            self._train()
+            try:
+                
+                self._detect_problem_type()
+                self._validate()
+                self._feature_engineering()
+                self._split()
+                self._train()
 
+                self._cached_metrics = self._evaluate_final()
+                self._cached_drift   = self._check_drift()
 
-            self._cached_metrics = self._evaluate_final()
-            self._cached_drift   = self._check_drift()
+                registration = self.save_to_registry(model_name=model_name)
+                
+                
+                safe_predictions = []
+                if self.predictions is not None:
+                    safe_predictions = getattr(self.predictions[:20], "tolist", lambda: list(self.predictions[:20]))()
 
+                safe_actual_values = []
+                if self.actual_values is not None:
+                    safe_actual_values = getattr(self.actual_values[:20], "tolist", lambda: list(self.actual_values[:20]))()
+                
 
-            registration = self.save_to_registry(model_name=model_name)
-        
-            
+                
+                result = PipelineResult(
+                    status="SUCCESS",
+                    model_name=model_name,
+                    model_version=str(registration.get("version", "unknown")),
+                    metrics=self._cached_metrics,
+                    artifacts_path=registration.get("path", ""),
+                    feature_columns=self.feature_columns,
+                    metadata={
+                        "problem_type": self.problem_type.name,
+                        "is_drifted": self._cached_drift["is_drifted"]
+                    },
+                    predictions=safe_predictions,    
+                    actual_values=safe_actual_values    
+                )
 
-            # Construct the Contract
-            result = PipelineResult(
-                status="SUCCESS",
-                model_name=model_name,
-                model_version=str(registration.get("version", "unknown")),
-                metrics=self._cached_metrics,
-                artifacts_path=registration.get("path", ""),
-                feature_columns=self.feature_columns,
-                metadata={
-                    "problem_type": self.problem_type.name,
-                    "is_drifted": self._cached_drift["is_drifted"]
-                },
-                predictions=self.predictions[:20],  
-                actual_values=self.actual_values[:20]
-            )
-            
-            logger.info(f"Pipeline finished successfully for {model_name}")
-            return result
+                
+                result.artifacts = {
+                    "predictions": safe_predictions,
+                    "actual_values": safe_actual_values
+                }
+                
+                logger.info(f"Pipeline finished successfully for {model_name}")
+                return result
 
-        except Exception as e:
-            logger.error(f"Pipeline failed: {str(e)}")
-            raise e
+            except Exception as e:
+                logger.error(f"Pipeline failed: {str(e)}")
+                raise e
 
     
     
@@ -367,7 +379,7 @@ class TabularPipeline(BasePipeline):
             "Pipeline has not been trained. Call execute_pipeline() first."
         )
  
-        # Normalise input to Polars
+    
         if isinstance(data, pl.DataFrame):
             inference_df = data
         elif isinstance(data, pd.DataFrame):
@@ -433,6 +445,16 @@ class TabularPipeline(BasePipeline):
         if not self.s3_client:
             raise ValueError("Pipeline initialized without an S3Client. Cannot register model.")
         
+        normalized_model_name = model_name
+        if "/" in model_name or ".parquet" in model_name:
+            # 1. Take everything after the last slash to drop folder trees
+            normalized_model_name = model_name.split("/")[-1]
+            # 2. Replace a dot notation delimiter if it joins an extension tracking string
+            normalized_model_name = normalized_model_name.replace(".parquet_", "_")
+            normalized_model_name = normalized_model_name.replace(".parquet", "")
+
+        logger.info(f"Dynamic name normalization: '{model_name}' ──> '{normalized_model_name}'")
+        
         registry = ModelRegistry(base_path=registry_path, s3_client=self.s3_client)
         
         # Collect artifacts and metrics
@@ -446,7 +468,8 @@ class TabularPipeline(BasePipeline):
             for k, v in raw_params.items()
         }
 
-        next_version = registry._next_version(model_name)
+        next_version = registry._next_version(normalized_model_name)
+       
 
         training_data_key = (
             f"{registry_path}/"
@@ -477,16 +500,16 @@ class TabularPipeline(BasePipeline):
         
         registration_result = registry.register(
             model=self.model,
-            model_name=model_name,
+            model_name=normalized_model_name,
             metrics=self._cached_metrics,
-            parameters=self.model.model.get_params() if hasattr(self.model.model, 'get_params') else {},
+            parameters=sanitized_params,
             problem_type=self.problem_type.name,
             training_data_key=training_data_key,
             stage="staging"
         )
 
         registry.promote(
-            model_name=model_name,
+            model_name=normalized_model_name,
             version=registration_result["version"],
             new_stage="production",
         )

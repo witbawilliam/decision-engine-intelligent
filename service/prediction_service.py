@@ -7,7 +7,7 @@ import uuid
 import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import polars as pl
@@ -26,12 +26,13 @@ logger = get_logger(__name__, component="prediction_service")
 TIMEOUTS = {
     "model_inference": 10.0,
     "cache_io":        0.5,
-    "explanations":    30.0,   
+    "explanations":    30.0,
 }
+
 
 def normalize_model_identifier(model_name: str) -> str:
     """
-    Pipeline-agnostic utility to strip path configurations, directories, 
+    Pipeline-agnostic utility to strip path configurations, directories,
     and file extensions from raw tracking parameters cleanly.
     """
     normalized = model_name
@@ -41,18 +42,20 @@ def normalize_model_identifier(model_name: str) -> str:
         normalized = normalized.replace(".parquet", "")
     return normalized
 
+
 @dataclass
 class PredictionRequest:
     features:   Dict[str, Any]
     model_name: str
-    request_id: str  = field(default_factory=lambda: str(uuid.uuid4()))
-    trace_id:   str  = field(default_factory=lambda: str(uuid.uuid4()))
+    request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    trace_id:   str = field(default_factory=lambda: str(uuid.uuid4()))
     include_explanations: bool = False
 
-    lever_col:   Optional[str]   = None   
-    target_goal: Optional[float] = None   
-    lever_min:   Optional[float] = None   
-    lever_max:   Optional[float] = None   
+    lever_col:   Optional[str]   = None
+    target_goal: Optional[float] = None
+    lever_min:   Optional[float] = None
+    lever_max:   Optional[float] = None
+
 
 @dataclass
 class PredictionResponse:
@@ -62,9 +65,10 @@ class PredictionResponse:
     model_version: str
     risk_score:    float
     latency_ms:    float
-    cached:        bool                    = False
+    cached:        bool                     = False
     explanations:  Optional[Dict[str, Any]] = None
-    trace_id:      str                     = ""
+    trace_id:      str                      = ""
+
 
 class PredictionService:
 
@@ -72,9 +76,13 @@ class PredictionService:
         self.registry = registry
         self.redis    = redis
         self.pg       = pg
-        self._model_cache: Dict[str, Any]           = {}
-        self._guard_cache: Dict[str, ManifoldGuard] = {}
-        self._training_cache: Dict[str, pl.DataFrame] = {}  # In-memory background data cache
+        self._model_cache:    Dict[str, Any]            = {}
+        self._guard_cache:    Dict[str, ManifoldGuard]  = {}
+        self._training_cache: Dict[str, pl.DataFrame]   = {}
+
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
 
     async def predict(self, request: PredictionRequest) -> PredictionResponse:
         set_trace_id(request.trace_id)
@@ -90,9 +98,9 @@ class PredictionService:
 
             model, version = await self._get_model(clean_model_name)
             X              = pl.DataFrame([request.features])
-            
-            risk_score     = await self._risk_score(clean_model_name, X)
-            prediction     = await self._predict(model, X)
+
+            risk_score = await self._risk_score(clean_model_name, X)
+            prediction = await self._predict(model, X)
 
             result: Dict[str, Any] = {
                 "prediction":    self._extract(prediction),
@@ -102,7 +110,6 @@ class PredictionService:
             }
 
             if request.include_explanations:
-                # Optimized: Pass the precomputed risk_score to save CPU cycles
                 result["explanations"] = await self._run_explanations(
                     model, request, clean_model_name, X, precomputed_risk=risk_score
                 )
@@ -112,12 +119,112 @@ class PredictionService:
 
             return self._build_response(request, result, start, clean_model_name)
 
+    async def get_model_predictions(
+        self,
+        model_name: str,
+        version:    Optional[str] = None,
+        limit:      int = 100,
+        offset:     int = 0,
+        problem_type: str = "tabular",   # "tabular" or "forecasting"
+    ) -> Dict[str, Any]:
+
+        clean_model_name = normalize_model_identifier(model_name)
+        table = "forecast_evaluations" if problem_type == "forecasting" else "model_evaluations"
+        loop  = asyncio.get_running_loop()
+
+        def _query():
+            if version:
+                return PostgresClient.query(
+                    f"""
+                    SELECT model_name, model_version, problem_type,
+                        predicted, actual, prediction_date, created_at
+                    FROM {table}
+                    WHERE model_name = %s AND model_version = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (clean_model_name, version, limit, offset),
+                )
+            return PostgresClient.query(
+                f"""
+                SELECT model_name, model_version, problem_type,
+                    predicted, actual, prediction_date, created_at
+                FROM {table}
+                WHERE model_name = %s
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                (clean_model_name, limit, offset),
+            )
+
+        rows = await loop.run_in_executor(None, _query)
+        serialized = [
+            {
+                **row,
+                "created_at": row["created_at"].isoformat() if hasattr(row.get("created_at"), "isoformat") else str(row.get("created_at")),
+            }
+            for row in rows
+        ]
+
+        return {
+            "model_name":  clean_model_name,
+            "version":     version,
+            "count":       len(serialized),
+            "predictions": serialized,
+        }
+
+    async def get_prediction_audit(
+        self,
+        model_name: str,
+        limit:      int = 100,
+        offset:     int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Fetch real-time inference audit logs from prediction_audit.
+        These are written on every predict() call.
+        """
+        clean_model_name = normalize_model_identifier(model_name)
+        loop = asyncio.get_running_loop()
+
+        def _query():
+            return PostgresClient.query(
+                """
+                SELECT request_id, model_name, model_version,
+                       prediction, risk_score, latency_ms, timestamp
+                FROM prediction_audit
+                WHERE model_name = %s
+                ORDER BY timestamp DESC
+                LIMIT %s OFFSET %s
+                """,
+                (clean_model_name, limit, offset),
+            )
+
+        rows = await loop.run_in_executor(None, _query)
+
+        serialized = [
+            {
+                **row,
+                "timestamp": row["timestamp"].isoformat() if hasattr(row.get("timestamp"), "isoformat") else str(row.get("timestamp")),
+            }
+            for row in rows
+        ]
+
+        return {
+            "model_name": clean_model_name,
+            "count":      len(serialized),
+            "audit_logs": serialized,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
+
     async def _get_model(self, clean_model_name: str):
         if clean_model_name not in self._model_cache:
             loop = asyncio.get_running_loop()
-            
+
             def _load_sync():
-                model = self.registry.load(model_name=clean_model_name, stage="production")
+                model    = self.registry.load(model_name=clean_model_name, stage="production")
                 metadata = self.registry.list_versions(model_name=clean_model_name, stage="production")[0]
                 return model, metadata["version"]
 
@@ -145,34 +252,38 @@ class PredictionService:
 
     async def _risk_score(self, clean_model_name: str, X: pl.DataFrame) -> float:
         if clean_model_name not in self._guard_cache:
-            # We fetch training data via our cached loader to bootstrap the ManifoldGuard
             training = await self._get_training_sample(clean_model_name)
-            
+
             loop = asyncio.get_running_loop()
+
             def _init_guard():
                 guard = ManifoldGuard()
                 guard.fit(training)
                 return guard
-            
+
             self._guard_cache[clean_model_name] = await loop.run_in_executor(None, _init_guard)
-            
+
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._guard_cache[clean_model_name].get_risk_score, X)
 
-    async def _run_explanations(self, model, request: PredictionRequest, clean_model_name: str, X: pl.DataFrame, precomputed_risk: float) -> Optional[Dict[str, Any]]:
+    async def _run_explanations(
+        self,
+        model,
+        request: PredictionRequest,
+        clean_model_name: str,
+        X: pl.DataFrame,
+        precomputed_risk: float,
+    ) -> Optional[Dict[str, Any]]:
         try:
-            loop         = asyncio.get_running_loop()
-            
-            # Optimized: Pull background sample from local storage cache memory
-            training     = await self._get_training_sample(clean_model_name)
-            
-            analyzer     = SensitivityAnalyzer(model)
-            cf_orch      = CounterfactualOrchestrator(model, training)
-            guard        = self._guard_cache.get(clean_model_name)
+            loop     = asyncio.get_running_loop()
+            training = await self._get_training_sample(clean_model_name)
 
-            tasks = []
-            tasks.append(loop.run_in_executor(None, analyzer.analyze, X))
-            
+            analyzer = SensitivityAnalyzer(model)
+            cf_orch  = CounterfactualOrchestrator(model, training)
+            guard    = self._guard_cache.get(clean_model_name)
+
+            tasks = [loop.run_in_executor(None, analyzer.analyze, X)]
+
             cf_enabled = (
                 request.lever_col
                 and request.target_goal is not None
@@ -185,7 +296,7 @@ class PredictionService:
                 bounds = (float(request.lever_min), float(request.lever_max))
                 tasks.append(loop.run_in_executor(
                     None, cf_orch.explain_how_to_hit_target, X,
-                    float(request.target_goal), request.lever_col, bounds
+                    float(request.target_goal), request.lever_col, bounds,
                 ))
 
             results = await asyncio.wait_for(
@@ -200,25 +311,29 @@ class PredictionService:
             if isinstance(sens_result, Exception):
                 logger.warning("sensitivity_failed", extra={"error": str(sens_result)})
             else:
-                # Use model_dump(mode="json") if available to handle enum/date conversions cleanly
-                sensitivity_payload = sens_result.model_dump(mode="json") if hasattr(sens_result, "model_dump") else sens_result
+                sensitivity_payload = (
+                    sens_result.model_dump(mode="json")
+                    if hasattr(sens_result, "model_dump")
+                    else sens_result
+                )
 
             counterfactual_payload = None
             if cf_enabled and cf_result is not None:
                 if isinstance(cf_result, Exception):
                     logger.warning("counterfactual_failed", extra={"error": str(cf_result)})
                 else:
-                    if hasattr(cf_result, "model_dump"):
-                        counterfactual_payload = cf_result.model_dump(mode="json")
-                    else:
-                        counterfactual_payload = cf_result
+                    counterfactual_payload = (
+                        cf_result.model_dump(mode="json")
+                        if hasattr(cf_result, "model_dump")
+                        else cf_result
+                    )
 
             manifold_payload = None
             if guard is not None:
                 manifold_payload = {
-                    "risk_score":       precomputed_risk,  # Reused precomputed float variable safely
-                    "feature_count":    int(guard._feature_count),
-                    "numeric_columns":  list(guard._numeric_columns),
+                    "risk_score":      precomputed_risk,
+                    "feature_count":   int(guard._feature_count),
+                    "numeric_columns": list(guard._numeric_columns),
                 }
 
             payload = {
@@ -240,7 +355,10 @@ class PredictionService:
     async def _cache_get(self, key: str) -> Optional[Dict]:
         try:
             loop = asyncio.get_running_loop()
-            val  = await asyncio.wait_for(loop.run_in_executor(None, self.redis.get, key), timeout=TIMEOUTS["cache_io"])
+            val  = await asyncio.wait_for(
+                loop.run_in_executor(None, self.redis.get, key),
+                timeout=TIMEOUTS["cache_io"],
+            )
             return json.loads(val) if val else None
         except Exception:
             return None
@@ -249,19 +367,31 @@ class PredictionService:
         try:
             serialised = json.dumps(value, default=str)
             loop       = asyncio.get_running_loop()
-            await asyncio.wait_for(loop.run_in_executor(None, self.redis.setex, key, 300, serialised), timeout=TIMEOUTS["cache_io"])
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self.redis.setex, key, 300, serialised),
+                timeout=TIMEOUTS["cache_io"],
+            )
         except Exception as e:
             logger.warning("cache_set_failed", extra={"error": str(e)})
 
-    async def _audit(self, clean_model_name: str, request: PredictionRequest, result: Dict, start: float) -> None:
+    async def _audit(
+        self,
+        clean_model_name: str,
+        request: PredictionRequest,
+        result: Dict,
+        start: float,
+    ) -> None:
+        """Write every real-time inference call to prediction_audit."""
         try:
-            loop = asyncio.get_running_loop()
+            loop   = asyncio.get_running_loop()
             record = {
-                "request_id": request.request_id,
-                "model_name": clean_model_name,
-                "prediction": str(result["prediction"]),
-                "latency_ms": (time.perf_counter() - start) * 1000,
-                "timestamp":  datetime.now(timezone.utc),
+                "request_id":    request.request_id,
+                "model_name":    clean_model_name,
+                "model_version": result.get("model_version", "unknown"),  # now populated
+                "prediction":    str(result["prediction"]),
+                "risk_score":    float(result.get("risk_score", 0.0)),     # now populated
+                "latency_ms":    (time.perf_counter() - start) * 1000,
+                "timestamp":     datetime.now(timezone.utc),
             }
             await loop.run_in_executor(None, self.pg.insert, "prediction_audit", record)
         except Exception as e:
@@ -279,10 +409,16 @@ class PredictionService:
             val = prediction[0]
         else:
             val = prediction
-        # Strip numpy wrappers down to primitive float/int
         return val.item() if hasattr(val, "item") else val
 
-    def _build_response(self, request, data, start, clean_model_name: str, cached=False) -> PredictionResponse:
+    def _build_response(
+        self,
+        request,
+        data,
+        start,
+        clean_model_name: str,
+        cached: bool = False,
+    ) -> PredictionResponse:
         return PredictionResponse(
             request_id=request.request_id,
             model_name=clean_model_name,

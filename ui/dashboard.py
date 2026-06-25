@@ -636,147 +636,118 @@ else:
                 )
 
         # ── FETCH 
-        if st.button(" Fetch Predictions", type="primary"):
+        if st.button("Fetch Predictions", type="primary"):
 
-            sample = df_pred.head(int(infer_n))
-
-            features_df = (
-                sample
-                .drop(columns=[infer_target], errors="ignore")
-                .fillna(0)
+    # ── Single API call to get all saved predictions from model_evaluations ──
+            response = safe_request(
+                "GET",
+                f"{API_BASE_URL}/v1/inference/predictions/{resolved_model}",
+                params={"limit": int(infer_n), "offset": 0},
             )
 
-            rows = features_df.to_dict(orient="records")
+            if not response or response.status_code != 200:
+                st.error("Failed to fetch predictions from the server.")
+            else:
+                data     = response.json()
+                rows     = data.get("predictions", [])
 
-            st.caption(
-                f"Model: `{resolved_model}` | "
-                f"Rows: {len(rows)}"
-            )
-
-            predictions = []
-            actuals = []
-            latencies = []
-            explanations = []
-
-            progress = st.progress(0)
-
-            for idx, row in enumerate(rows):
-
-                payload = {
-                    "model_name":           resolved_model,
-                    "features":             sanitize_row(row),
-                    "include_explanations": include_explanations,
-                    # Counterfactual lever controls — only sent when set
-                    "lever_col":            lever_col   if lever_col   else None,
-                    "target_goal":          float(target_goal) if lever_col and target_goal is not None else None,
-                    "lever_min":            float(lever_min)   if lever_col and lever_min   is not None else None,
-                    "lever_max":            float(lever_max)   if lever_col and lever_max   is not None else None,
-                }
-
-                response = safe_request(
-                    "POST",
-                    f"{API_BASE_URL}/v1/inference/predict",
-                    json=payload,
-                )
-
-                if response and response.status_code == 200:
-
-                    data = response.json()
-
-                    predictions.append(data.get("prediction"))
-                    latencies.append(data.get("latency_ms", 0))
-
-                    actuals.append(
-                        sample.iloc[idx].get(infer_target)
-                    )
-
-                    explanations.append(
-                        data.get("explanations", {})
-                    )
-
+                if not rows:
+                    st.warning(f"No predictions found for model `{resolved_model}`.")
                 else:
-                    predictions.append(None)
-                    actuals.append(None)
-                    latencies.append(0)
-                    explanations.append(None)
+                    st.caption(
+                        f"Model: `{resolved_model}` | "
+                        f"Version: `{data.get('version', 'N/A')}` | "
+                        f"Rows: {data.get('count', len(rows))}"
+                    )
 
-                progress.progress((idx + 1) / len(rows))
+                    predictions = [r.get("predicted") for r in rows]
+                    actuals     = [r.get("actual")    for r in rows]
+                    created_ats = [r.get("created_at") for r in rows]
 
-            progress.empty()
+                    st.success(f"Loaded {len(rows)} predictions")
 
-            st.success("Inference completed")
-
-            summary_df = pd.DataFrame({
-                "Actual": actuals,
-                "Prediction": predictions,
-                "Latency (ms)": latencies,
-            })
-
-            st.dataframe(summary_df, width="stretch")
-
-            col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Rows Processed",
-                len(predictions)
-            )
-
-            col2.metric(
-                "Average Latency",
-                f"{np.mean(latencies):.2f} ms"
-            )
-
-            col3.metric(
-                "Model",
-                resolved_model
-            )
-
-            fig = go.Figure()
-
-            fig.add_trace(
-                go.Scatter(
-                    y=actuals,
-                    mode="lines+markers",
-                    name="Actual"
-                )
-            )
-
-            fig.add_trace(
-                go.Scatter(
-                    y=predictions,
-                    mode="lines+markers",
-                    name="Prediction"
-                )
-            )
-
-            fig.update_layout(
-                title="Prediction vs Actual",
-                height=400,
-            )
-
-            st.plotly_chart(fig, width="stretch")
-
-            if include_explanations:
-
-                st.markdown(" Decision Intelligence")
-
-                # Build full response dicts so render_explanation_panel
-                # can access both top-level risk_score and nested explanations
-                full_responses = []
-                for idx in range(len(predictions)):
-                    full_responses.append({
-                        "prediction":   predictions[idx],
-                        "risk_score":   (explanations[idx] or {}).get("manifold", {}).get("risk_score", 0.0)
-                                        if explanations[idx] else 0.0,
-                        "explanations": explanations[idx],
+                    # ── Summary table ──
+                    summary_df = pd.DataFrame({
+                        "Actual":     actuals,
+                        "Prediction": predictions,
+                        "Saved At":   created_ats,
                     })
 
-                for idx, response_data in enumerate(full_responses):
-                    if not response_data.get("explanations"):
-                        continue
-                    render_explanation_panel(
-                        response_data,
-                        idx,
-                        infer_target,
-                        numeric_cols,
+                    st.dataframe(summary_df, use_container_width=True)
+
+                    # ── Metrics ──
+                    col1, col2, col3 = st.columns(3)
+
+                    col1.metric("Rows Loaded", len(predictions))
+
+                    valid_pairs = [
+                        (a, p) for a, p in zip(actuals, predictions)
+                        if a is not None and p is not None
+                    ]
+                    if valid_pairs:
+                        mae = np.mean([abs(a - p) for a, p in valid_pairs])
+                        col2.metric("MAE", f"{mae:.4f}")
+                    else:
+                        col2.metric("MAE", "N/A")
+
+                    col3.metric("Model", resolved_model)
+
+                    # ── Prediction vs Actual chart ──
+                    fig = go.Figure()
+
+                    fig.add_trace(go.Scatter(
+                        y=actuals,
+                        mode="lines+markers",
+                        name="Actual",
+                        line=dict(color="#1f77b4"),
+                    ))
+
+                    fig.add_trace(go.Scatter(
+                        y=predictions,
+                        mode="lines+markers",
+                        name="Prediction",
+                        line=dict(color="#ff7f0e"),
+                    ))
+
+                    fig.update_layout(
+                        title="Prediction vs Actual",
+                        xaxis_title="Sample Index",
+                        yaxis_title="Value",
+                        height=400,
                     )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # ── Scatter plot: predicted vs actual ──
+                    if valid_pairs:
+                        actuals_v, preds_v = zip(*valid_pairs)
+
+                        scatter_fig = go.Figure()
+
+                        scatter_fig.add_trace(go.Scatter(
+                            x=list(actuals_v),
+                            y=list(preds_v),
+                            mode="markers",
+                            name="Predicted vs Actual",
+                            marker=dict(color="#2ca02c", size=7, opacity=0.7),
+                        ))
+
+                        # Perfect prediction line
+                        min_val = min(min(actuals_v), min(preds_v))
+                        max_val = max(max(actuals_v), max(preds_v))
+                        scatter_fig.add_trace(go.Scatter(
+                            x=[min_val, max_val],
+                            y=[min_val, max_val],
+                            mode="lines",
+                            name="Perfect Fit",
+                            line=dict(color="red", dash="dash"),
+                        ))
+
+                        scatter_fig.update_layout(
+                            title="Predicted vs Actual (Scatter)",
+                            xaxis_title="Actual",
+                            yaxis_title="Predicted",
+                            height=400,
+                        )
+
+                        st.plotly_chart(scatter_fig, use_container_width=True)

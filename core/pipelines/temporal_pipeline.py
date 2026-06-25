@@ -23,6 +23,7 @@ from core.evaluation.backtesting import TimeSeriesBacktester
 from core.drift.drift_detector import DriftDetector
 from core.models.model_registry import ModelRegistry
 from storage.s3_client import S3Client
+from storage.postgres_client import PostgresClient
 
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
@@ -114,9 +115,17 @@ class TemporalPipeline(BasePipeline):
         self.is_fitted = True
         if self.config.run_backtest:
             self._run_backtesting()
+
         metrics = self._evaluate_final()
+
         if self.config.auto_register:
             self._register_model()
+
+        model_name    = self._registry_metadata.get("model_name", f"prophet_{self.experiment_id}")
+        model_version = str(self._registry_metadata.get("version", "1"))
+        self._save_predictions_to_db(model_name, model_version)   
+
+        
 
         end_ts = datetime.utcnow()    
         duration = time.perf_counter() - start_wall
@@ -600,4 +609,33 @@ class TemporalPipeline(BasePipeline):
             "[Registry] Model '%s' v%s promoted to production.",
             self._registry_metadata["model_name"],
             self._registry_metadata["version"],
+        )
+
+    def _save_predictions_to_db(self, model_name: str, model_version: str) -> None:
+        if not self._prediction_results:
+            logger.warning("[DB] No predictions to save — skipping DB write.")
+            return
+
+        for row in self._prediction_results:
+            PostgresClient.execute(
+                """
+                INSERT INTO forecast_evaluations
+                    (model_name, model_version, problem_type, predicted, actual, prediction_date)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    model_name,
+                    model_version,
+                    ProblemType.FORECASTING.name,
+                    float(row["predicted"]),
+                    float(row["actual"]),
+                    row.get("date"),
+                )
+            )
+
+        logger.info(
+            "[DB] Saved %d predictions to forecast_evaluations for %s v%s",
+            len(self._prediction_results),
+            model_name,
+            model_version,
         )

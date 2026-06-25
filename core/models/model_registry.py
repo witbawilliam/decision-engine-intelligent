@@ -69,6 +69,36 @@ CREATE TABLE IF NOT EXISTS prediction_files (
 );
 """
 
+_CREATE_MODEL_EVALUATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS model_evaluations (
+    id             SERIAL PRIMARY KEY,
+    model_name     TEXT NOT NULL,
+    model_version  TEXT NOT NULL,
+    problem_type   TEXT,
+    predicted      DOUBLE PRECISION NOT NULL,
+    actual         DOUBLE PRECISION,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
+    
+);
+CREATE INDEX IF NOT EXISTS idx_me_model_name ON model_evaluations (model_name);
+CREATE INDEX IF NOT EXISTS idx_me_created_at ON model_evaluations (created_at DESC);
+"""
+
+_CREATE_FORECAST_EVALUATIONS_SQL = """
+CREATE TABLE IF NOT EXISTS forecast_evaluations (
+    id               SERIAL PRIMARY KEY,
+    model_name       TEXT NOT NULL,
+    model_version    TEXT NOT NULL,
+    problem_type     TEXT DEFAULT 'FORECASTING',
+    predicted        DOUBLE PRECISION NOT NULL,
+    actual           DOUBLE PRECISION,
+    prediction_date  TEXT,
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fe_model_name ON forecast_evaluations (model_name);
+CREATE INDEX IF NOT EXISTS idx_fe_date ON forecast_evaluations (prediction_date);
+"""
+
 
 class ModelRegistry:
    
@@ -319,6 +349,8 @@ class ModelRegistry:
         PostgresClient.execute(_CREATE_TABLE_SQL)
         PostgresClient.execute(_CREATE_PREDICTION_AUDIT_SQL)
         PostgresClient.execute(_CREATE_PREDICTION_FILES_SQL)
+        PostgresClient.execute(_CREATE_MODEL_EVALUATIONS_SQL)
+        PostgresClient.execute(_CREATE_FORECAST_EVALUATIONS_SQL)
 
         logger.debug("model_registry table ensured")
         logger.debug("prediction_audit table ensured")

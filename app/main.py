@@ -50,6 +50,8 @@ from app.api.routes_feedback  import router as feedback_router
 from monitoring.logging_config import get_logger, LoggingConfigurator, shutdown_logging
 
 
+
+
 settings = get_settings()
 
 LoggingConfigurator.configure(level=settings.log_level)

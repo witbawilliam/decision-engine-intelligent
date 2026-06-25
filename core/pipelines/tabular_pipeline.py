@@ -3,6 +3,9 @@ import io
 import logging
 from typing import Dict, Any
 import numpy as np
+import psycopg2
+from psycopg2.extras import execute_values
+import os
 
 import polars as pl
 
@@ -25,6 +28,7 @@ from typing import Dict, Any, List, Optional
 from sklearn.metrics import accuracy_score, f1_score, precision_score
 from sklearn.model_selection import train_test_split
 from storage.s3_client import S3Client
+from storage.postgres_client import PostgresClient
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +81,13 @@ class TabularPipeline(BasePipeline):
                 self._cached_metrics = self._evaluate_final()
                 self._cached_drift   = self._check_drift()
 
+
                 registration = self.save_to_registry(model_name=model_name)
+
+                self._save_predictions_to_db(                   
+                    model_name=registration.get("model_name", model_name),
+                    model_version=str(registration.get("version", "unknown"))
+                )
                 
                 
                 safe_predictions = []
@@ -519,3 +529,22 @@ class TabularPipeline(BasePipeline):
 
         logger.info(f"Model successfully promoted: {model_name} v{registration_result['version']}")
         return registration_result
+    
+    
+
+    def _save_predictions_to_db(self, model_name: str, model_version: str) -> None:
+        if self.predictions is None or self.actual_values is None:
+            logger.warning("No predictions to save — skipping DB write.")
+            return
+
+        for pred, actual in zip(self.predictions, self.actual_values):
+            PostgresClient.execute(
+                """
+                INSERT INTO model_evaluations
+                    (model_name, model_version, problem_type, predicted, actual)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (model_name, model_version, self.problem_type.name, float(pred), float(actual))
+            )
+
+        logger.info(f"Saved {len(self.predictions)} predictions to model_evaluations for {model_name} v{model_version}")

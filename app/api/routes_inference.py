@@ -22,9 +22,6 @@ router = APIRouter(
 )
 
 
-# ==================================================
-# REQUEST SCHEMA
-# ==================================================
 class InferencePayloadSchema(BaseModel):
     model_name: str = Field(..., example="auto_forecasting_model")
     features:   Dict[str, Any] = Field(..., example={"feature_1": 12.5})
@@ -37,9 +34,6 @@ class InferencePayloadSchema(BaseModel):
     lever_max:   Optional[float] = None
 
 
-# ==================================================
-# SERVICE DEPENDENCY — reads from app.state
-# ==================================================
 def get_prediction_service(request: Request) -> PredictionService:
     service = getattr(request.app.state, "prediction_service", None)
     if service is None:
@@ -50,9 +44,6 @@ def get_prediction_service(request: Request) -> PredictionService:
     return service
 
 
-# ==================================================
-# INFERENCE ENDPOINT
-# ==================================================
 @router.post("/predict", response_model=PredictionResponse, status_code=status.HTTP_200_OK)
 async def execute_model_inference(
     payload: InferencePayloadSchema,
@@ -83,9 +74,6 @@ async def execute_model_inference(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Inference failed: {str(exc)}")
 
 
-# ==================================================
-# GET PREDICTIONS + ACTUALS (from model_evaluations)
-# ==================================================
 @router.get("/predictions/{model_name}", status_code=status.HTTP_200_OK)
 async def get_model_predictions(
     model_name: str,
@@ -108,9 +96,6 @@ async def get_model_predictions(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch predictions: {str(exc)}")
 
 
-# ==================================================
-# GET AUDIT LOGS (from prediction_audit)
-# ==================================================
 @router.get("/audit/{model_name}", status_code=status.HTTP_200_OK)
 async def get_prediction_audit(
     model_name: str,
@@ -131,9 +116,6 @@ async def get_prediction_audit(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch audit logs: {str(exc)}")
 
 
-# ==================================================
-# HEALTH CHECK
-# ==================================================
 @router.get("/health", status_code=status.HTTP_200_OK)
 async def health(
     request: Request,

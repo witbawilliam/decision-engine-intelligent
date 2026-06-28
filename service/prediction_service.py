@@ -80,9 +80,9 @@ class PredictionService:
         self._guard_cache:    Dict[str, ManifoldGuard]  = {}
         self._training_cache: Dict[str, pl.DataFrame]   = {}
 
-    # ------------------------------------------------------------------ #
-    #  Public API                                                          #
-    # ------------------------------------------------------------------ #
+    
+    #  Public API                                                          
+
 
     async def predict(self, request: PredictionRequest) -> PredictionResponse:
         set_trace_id(request.trace_id)
@@ -215,9 +215,7 @@ class PredictionService:
             "audit_logs": serialized,
         }
 
-    # ------------------------------------------------------------------ #
-    #  Internal helpers                                                    #
-    # ------------------------------------------------------------------ #
+    
 
     async def _get_model(self, clean_model_name: str):
         if clean_model_name not in self._model_cache:

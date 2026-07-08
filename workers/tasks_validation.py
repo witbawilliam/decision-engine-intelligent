@@ -78,18 +78,7 @@ class TaskValidationConfig:
 
 
 class TaskValidator:
-    """
-    Orchestrates all validation gates for a single ML job submission.
-
-    Gate order (fail-fast):
-      1. Schema validation        — Pydantic V1 models from job_schema.py
-      2. Status-transition check  — ALLOWED_TRANSITIONS guard
-      3. Circuit breaker          — quality / drift / performance / time / failures
-      4. Drift detection          — KS p-value per feature (DriftDetector)
-      5. Statistical tests        — PSI / KS / KL / JS per flagged feature
-      6. Explainability           — SHAP + gain importance (optional, skipped if no model)
-      7. Persist to PostgreSQL    — audit trail via PostgresClient
-    """
+   
 
     def __init__(self, config: Optional[TaskValidationConfig] = None):
         self.config = config or TaskValidationConfig()

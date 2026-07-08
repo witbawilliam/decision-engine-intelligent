@@ -200,23 +200,7 @@ class TabularPipeline(BasePipeline):
     
     
     def _feature_engineering(self) -> None:
-        """
-        Feature preprocessing using the production FeatureProcessor.
-
-        Execution order (all inside FeatureProcessor.fit_transform):
-          1. Target validation   — sentinel cleanup, null drop, dtype cast
-          2. Duplicate removal
-          3. Feature string cleaning — sentinels → null in feature cols
-          4. Column classification  — numeric / temporal / categorical
-          5. Feature selection   — leakage, low-variance, high-null pruning
-          6. Imputation          — fit medians/modes on THIS training data
-          7. Encoding            — fit ordinal maps on THIS training data
-          8. Scaling             — fit stats on THIS training data (NONE for XGBoost)
-
-        The fitted processor is stored on self.processor so predict()
-        can call self.processor.transform(inference_df) and reuse the
-        exact same statistics — no training-serving skew.
-        """
+      
         self.processor = FeatureProcessor(
             target_column    = self.target_column,
             problem_type     = self.problem_type,       # drives target casting + scaling advice
@@ -231,8 +215,7 @@ class TabularPipeline(BasePipeline):
         self.df                   = processed_df
         self.preprocessing_metadata = metadata
 
-        # Derive feature lists from the cleaned schema
-        # (columns may have been dropped by the selector)
+       
         self.numeric_features = [
             c for c, t in self.df.schema.items()
             if t.is_numeric() and c != self.target_column
@@ -375,13 +358,7 @@ class TabularPipeline(BasePipeline):
     
 
     def predict(self, data: Any) -> Any:
-        """
-        High-level inference entry point.
- 
-        Uses the FITTED FeatureProcessor from training (self.feature_processor)
-        to guarantee that all transformations are applied with the exact same
-        statistics computed during training — eliminating training-serving skew.
-        """
+       
         assert hasattr(self, "processor"), (
             "Pipeline has not been trained. Call execute_pipeline() first."
         )
@@ -448,18 +425,16 @@ class TabularPipeline(BasePipeline):
     
 
     def save_to_registry(self, model_name: str, registry_path: str = "ml_registry"):
-        """
-        Connects the Pipeline results to the Model Registry.
-        """
+       
 
         if not self.s3_client:
             raise ValueError("Pipeline initialized without an S3Client. Cannot register model.")
         
         normalized_model_name = model_name
         if "/" in model_name or ".parquet" in model_name:
-            # 1. Take everything after the last slash to drop folder trees
+            # Take everything after the last slash to drop folder trees
             normalized_model_name = model_name.split("/")[-1]
-            # 2. Replace a dot notation delimiter if it joins an extension tracking string
+            # Replace a dot notation delimiter if it joins an extension tracking string
             normalized_model_name = normalized_model_name.replace(".parquet_", "_")
             normalized_model_name = normalized_model_name.replace(".parquet", "")
 

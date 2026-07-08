@@ -12,9 +12,7 @@ AllowedMergeStrategy = Literal["inner", "left", "right", "outer"]
 
 
 class FileMeta(BaseModel):
-    """
-    Represents a single uploaded file.
-    """
+    
 
     filename: str = Field(..., min_length=3)
     file_type: AllowedFileType
@@ -37,9 +35,7 @@ class FileMeta(BaseModel):
 
 
 class MergeConfig(BaseModel):
-    """
-    Configuration used when merging two datasets.
-    """
+   
 
     left_on: str = Field(..., min_length=1)
     right_on: str = Field(..., min_length=1)
@@ -48,12 +44,7 @@ class MergeConfig(BaseModel):
 
 
 class UploadRequest(BaseModel):
-    """
-    Enterprise-level upload request supporting:
-      Single dataset
-      Dual dataset merge workflow
-    """
-
+    
 
 
     files: Annotated[List[FileMeta], Field(min_length=1, max_length=2)]
@@ -75,12 +66,12 @@ class UploadRequest(BaseModel):
     def validate_file_logic(self):
         file_count = len(self.files)
 
-        # Case 1: Single file → OK, no merge needed
+        
         if file_count == 1:
             if self.merge_config is not None:
                 raise ValueError("Merge config should not be provided for single file upload.")
 
-        # Case 2: Two files → must provide merge config
+        
         elif file_count == 2:
             if self.merge_config is None:
                 raise ValueError("Merge config is required when uploading two files.")
@@ -90,9 +81,7 @@ class UploadRequest(BaseModel):
 
 
 class UploadResponse(BaseModel):
-    """
-    Response returned after successful upload.
-    """
+    
 
     job_id: str
     status: Literal["uploaded", "queued", "processing", "complete", "faild"]

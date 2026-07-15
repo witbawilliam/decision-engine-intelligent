@@ -23,7 +23,7 @@ from sklearn.preprocessing import LabelEncoder
 from core.models.model_registry import ModelRegistry
 from core.feature_engineering.tabular_features import TabularIntelligenceEngine
 import pandas as pd
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Dict, Any, List, Optional
 from sklearn.metrics import accuracy_score, f1_score, precision_score
 from sklearn.model_selection import train_test_split
@@ -43,6 +43,7 @@ class PipelineResult:
     metadata: Dict[str, Any]
     predictions: Optional[List[float]] = None
     actual_values: Optional[List[float]] = None
+    artifacts: Dict[str, Any] = field(default_factory=dict)
 
 
 class TabularPipeline(BasePipeline):
@@ -61,6 +62,10 @@ class TabularPipeline(BasePipeline):
             
         super().__init__(df, target_column, problem_type=resolved, **kwargs)
         self.s3_client = s3_client 
+
+        self._cached_metrics: Dict[str, float] = {}
+        self._cached_drift: Dict[str, Any] = {}
+        self._cached_importance: Dict[str, Any] = {}
     
 
     def execute_pipeline(self, model_name: str) -> PipelineResult:
@@ -80,7 +85,7 @@ class TabularPipeline(BasePipeline):
 
                 self._cached_metrics = self._evaluate_final()
                 self._cached_drift   = self._check_drift()
-
+                self._cached_importance = self._post_training_analysis()
 
                 registration = self.save_to_registry(model_name=model_name)
 
@@ -172,15 +177,12 @@ class TabularPipeline(BasePipeline):
         """
 
         
-
-        # Infer schema
         schema_engine = SchemaInference(
             df=self.df,
             target_column=self.target_column,
         )
         inferred_schema = schema_engine.infer()
 
-        # Validate schema
         validator = SchemaValidator(
             df=self.df,
             schema=inferred_schema,
@@ -188,7 +190,6 @@ class TabularPipeline(BasePipeline):
         )
         validator.validate()
 
-        # Data quality
         quality_report = DataQualityAnalyzer(df=self.df).analyze()
 
         if not quality_report.status:
@@ -200,14 +201,38 @@ class TabularPipeline(BasePipeline):
     
     
     def _feature_engineering(self) -> None:
+
+        date_cols = [
+            c for c, t in self.df.schema.items()
+            if t in (pl.Date, pl.Datetime) or c.lower() in ("date", "datetime", "timestamp")
+        ]
+
+        for col in date_cols:
+            
+            if self.df[col].dtype == pl.Utf8:
+                self.df = self.df.with_columns(
+                    pl.col(col).str.to_date(strict=False).alias(col)
+                )
+
+            
+            self.df = self.df.with_columns([
+                pl.col(col).dt.year().alias(f"{col}_year"),
+                pl.col(col).dt.month().alias(f"{col}_month"),
+                pl.col(col).dt.day().alias(f"{col}_day"),
+                pl.col(col).dt.weekday().alias(f"{col}_weekday"),
+                pl.col(col).dt.ordinal_day().alias(f"{col}_day_of_year"),
+            ]).drop(col)  
+
+            logger.info(f"Date column '{col}' expanded into 5 numeric features.")
+
       
         self.processor = FeatureProcessor(
             target_column    = self.target_column,
             problem_type     = self.problem_type,       # drives target casting + scaling advice
             scaling_strategy = ScalingStrategy.NONE,    # XGBoost is scale-invariant
             leakage_threshold  = 0.995,
-            variance_threshold = 1,
-            null_threshold     = 0.60,
+            variance_threshold = 0.0,
+            null_threshold     = 0.90,
         )
 
         processed_df, metadata = self.processor.fit_transform(self.df)
@@ -266,31 +291,87 @@ class TabularPipeline(BasePipeline):
             and y.nunique() <= 50
         )
 
+        test_size = 0.15 if len(X) < 500 else 0.2
+
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             X,
             y,
-            test_size=0.2,
+            test_size=test_size,
             random_state=42,
             stratify=y if use_stratify else None
         )
 
         
-
-        logger.info("Train-test split completed.")
+        logger.info(f"Train-test split: {len(self.X_train)} train / {len(self.X_test)} test rows")
 
     
-    
-    
-
     def _train(self) -> None:
-        self.model = XGBoostModel(problem_type=self.problem_type)
+        n_rows     = len(self.X_train)
+        n_features = len(self.X_train.columns)
+
+        if n_rows < 500:
+            size_tier = "small"
+            overrides = {
+                "n_estimators":     100,
+                "max_depth":        3,
+                "min_child_weight": 5,
+                "reg_alpha":        0.5,
+                "reg_lambda":       2.0,
+                "gamma":            0.2,
+            }
+        elif n_rows < 5_000:
+            size_tier = "medium"
+            overrides = {
+                "n_estimators":     300,
+                "max_depth":        4,
+                "min_child_weight": 3,
+                "reg_alpha":        0.1,
+                "reg_lambda":       1.0,
+                "gamma":            0.1,
+            }
+        elif n_rows < 50_000:
+            size_tier = "large"
+            overrides = {
+                "n_estimators":     500,
+                "max_depth":        5,
+                "min_child_weight": 1,
+                "reg_alpha":        0.05,
+                "reg_lambda":       1.0,
+                "gamma":            0.0,
+            }
+        else:
+            size_tier = "xlarge"
+            overrides = {
+                "n_estimators":     1000,
+                "max_depth":        6,
+                "learning_rate":    0.02,
+                "min_child_weight": 1,
+                "reg_alpha":        0.01,
+                "reg_lambda":       1.0,
+                "gamma":            0.0,
+                "subsample":        0.9,
+                "colsample_bytree": 0.9,
+            }
+
+        logger.info(
+            f"Dataset tier: {size_tier} | "
+            f"{n_rows} rows {n_features} features | "
+            f"n_estimators={overrides['n_estimators']} "
+            f"max_depth={overrides['max_depth']}"
+        )
+
+        
+        self.model = XGBoostModel(
+            problem_type=self.problem_type,
+            params=overrides,
+        )
 
         y_train = self.y_train
 
         if self.problem_type == ProblemType.CLASSIFICATION:
             self.label_encoder = LabelEncoder()
             y_train = self.label_encoder.fit_transform(self.y_train)
-        else: 
+        else:
             self.label_encoder = None
 
         train_df = pl.from_pandas(self.X_train)
@@ -298,13 +379,13 @@ class TabularPipeline(BasePipeline):
             pl.Series(self.target_column, y_train)
         )
 
-        self.model.fit(
-            df=train_df,
-            target_column=self.target_column
-        )
-
+        self.model.fit(df=train_df, target_column=self.target_column)
         self.feature_columns = self.model.feature_names
-        logger.info("Model training completed.")
+        logger.info(f"Model training completed. Features: {self.feature_columns}")
+
+        
+        
+    
 
     
 
@@ -417,7 +498,7 @@ class TabularPipeline(BasePipeline):
             "feature_processor": self.processor,
             "problem_type": self.problem_type.name,
             "feature_importance": self._post_training_analysis(),
-            "drift_report": self._check_drift(),
+            "drift_report": self._cached_drift,
             "numeric_features": self.numeric_features,
             "categorical_features": self.categorical_features,
             "preprocessing_metadata": self.preprocessing_metadata,

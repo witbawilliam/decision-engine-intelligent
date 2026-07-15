@@ -76,8 +76,8 @@ class XGBoostModel:
         # Formulas
         default_params = {
             "n_estimators": 500,
-            "learning_rate": 0.03,
-            "max_depth": 6,
+            "learning_rate": 0.05,
+            "max_depth": 3,
             "subsample": 0.8,
             "colsample_bytree": 0.8,
             "random_state": 42,

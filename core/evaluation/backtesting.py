@@ -91,22 +91,25 @@ class TimeSeriesBacktester:
                 )
 
     def _evaluate_fold(self, model_factory, train: pl.DataFrame, test: pl.DataFrame) -> Dict[str, float]:
-        
         model = model_factory()
         model.fit(train.to_pandas())
-        model.fit(train)
-        
-        forecast = model.predict(self.horizon)
-        
+
+        future_df = model.make_future_dataframe(
+            periods=self.horizon,
+            include_history=False,
+        )
+        forecast = model.predict(future_df)
+
         if isinstance(forecast, dict) and "yhat" in forecast:
             y_pred = forecast["yhat"][-self.horizon:]
-        elif hasattr(forecast, "forecast"): 
+        elif hasattr(forecast, "forecast"):
             y_pred = forecast.forecast["yhat"][-self.horizon:]
+        elif hasattr(forecast, "yhat"):
+            y_pred = np.asarray(forecast.yhat)[-self.horizon:]
         else:
             y_pred = forecast
 
         y_true = test[self.target_column].to_numpy()
-        
         return self._compute_metrics(y_true, np.array(y_pred))
 
 

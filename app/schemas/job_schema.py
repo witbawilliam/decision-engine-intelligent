@@ -85,9 +85,10 @@ class V1:
         filename: str
         target_column: Optional[str] = None
         problem_type: Optional[ProblemType] = None
-        s3_key: Optional[str] = None            # ← S3 path to the uploaded dataset
+        s3_key: Optional[str] = None            #  S3 path to the uploaded dataset
         reference_s3_key: Optional[str] = None
         time_column: Optional[str] = None
+        product_col: Optional[str] = None
         forecast_horizon: Optional[int] = 30
 
     class JobStatusResponse(BaseModel):
@@ -138,19 +139,38 @@ class V1:
             raise ValueError("filename must not exceed 255 characters.")
         return v
 
-
     def validate_column_name(v: Optional[str]) -> Optional[str]:
+        """
+        Validate a user-provided dataframe column name.
+
+        Column names may contain spaces and normal punctuation.
+        Only empty names, control characters, and excessively long
+        names are rejected.
+        """
         if v is None:
-            return v
+            return None
+
+        if not isinstance(v, str):
+            raise ValueError("target_column must be a string.")
+
         v = v.strip()
+
         if not v:
-            raise ValueError("target_column must not be an empty string.")
-        if not _COLUMN_NAME_RE.match(v):
             raise ValueError(
-                f"target_column '{v}' must contain only word characters (a-z, A-Z, 0-9, _)."
+                "target_column must not be an empty string."
             )
+
         if len(v) > 128:
-            raise ValueError("target_column must not exceed 128 characters.")
+            raise ValueError(
+                "target_column must not exceed 128 characters."
+            )
+
+        # Reject control characters such as newline, tab, null, etc.
+        if any(ord(char) < 32 or ord(char) == 127 for char in v):
+            raise ValueError(
+                "target_column contains invalid control characters."
+            )
+
         return v
 
 

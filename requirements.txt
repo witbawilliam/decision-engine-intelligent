@@ -24,3 +24,4 @@ python-json-logger>=2.0.0
 shap>=0.45.0
 prometheus-client>=0.20.0
 plotly
+mlflow>=2.13.0

@@ -37,11 +37,9 @@ class TemporalPipelineConfig:
 
     def __init__(
         self,
-        # Forecasting horizon
+        
         forecast_horizon: int = 30,
         forecast_freq: str = "D",
-
-        # Feature engineering
         temporal_resolution: TemporalResolution = TemporalResolution.LOW,
         add_cyclic_signals: bool = True,
 
@@ -381,6 +379,15 @@ class TemporalPipeline(BasePipeline):
             changepoint_prior_scale = self.config.changepoint_prior_scale,
         )
 
+        missing_regressors = [
+            c for c in self.config.extra_regressors if c not in self._train_df.columns
+        ]
+        if missing_regressors:
+            raise ValueError(
+                f"extra_regressors {missing_regressors} not found in training data "
+                f"for experiment '{self.experiment_id}'."
+            )
+
         train_pd = self._train_df.select(
             [self.datetime_column, self.target_column] + self.config.extra_regressors
         ).to_pandas()
@@ -639,3 +646,32 @@ class TemporalPipeline(BasePipeline):
             model_name,
             model_version,
         )
+
+
+
+def train_all_products(
+    full_df: pl.DataFrame,
+    product_col: str,
+    target_column: str,
+    datetime_column: str,
+    s3_client: S3Client,
+    config: Optional[TemporalPipelineConfig] = None,
+) -> Dict[str, PipelineResult]:
+    results = {}
+    for product_id in full_df[product_col].unique().to_list():
+        product_df = full_df.filter(pl.col(product_col) == product_id)
+
+        if product_df.height < 30:  # guard: not enough history to forecast
+            logger.warning("Skipping product %s — insufficient rows (%d)", product_id, product_df.height)
+            continue
+
+        pipeline = TemporalPipeline(
+            dataframe       = product_df,
+            target_column   = target_column,
+            datetime_column = datetime_column,
+            s3_client       = s3_client,
+            experiment_id   = f"product_{product_id}",
+            config          = config,
+        )
+        results[str(product_id)] = pipeline.run()
+    return results

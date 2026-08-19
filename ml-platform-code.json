@@ -1,0 +1,118 @@
+{
+  "title": "ML Platform",
+  "uid": "ml-platform-001",
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Predictions",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT COUNT(*) as value FROM prediction_audit",
+        "format": "table"
+      }],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "fixedColor": "blue", "mode": "fixed" } } }
+    },
+    {
+      "id": 2,
+      "title": "Avg Latency (ms)",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT ROUND(AVG(latency_ms)::numeric, 2) as value FROM prediction_audit",
+        "format": "table"
+      }],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "fixedColor": "green", "mode": "fixed" }, "unit": "ms" } }
+    },
+    {
+      "id": 3,
+      "title": "Models in Production",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT COUNT(DISTINCT model_name) as value FROM prediction_audit",
+        "format": "table"
+      }],
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "fieldConfig": { "defaults": { "color": { "fixedColor": "purple", "mode": "fixed" } } }
+    },
+    {
+      "id": 4,
+      "title": "Predictions Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT date_trunc('hour', timestamp) as time, COUNT(*) as predictions FROM prediction_audit WHERE timestamp >= NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY 1",
+        "format": "time_series"
+      }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 5,
+      "title": "Avg Latency Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT date_trunc('hour', timestamp) as time, ROUND(AVG(latency_ms)::numeric, 2) as avg_latency_ms FROM prediction_audit WHERE timestamp >= NOW() - INTERVAL '7 days' GROUP BY 1 ORDER BY 1",
+        "format": "time_series"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 6,
+      "title": "Predictions per Model",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT model_name, COUNT(*) as predictions FROM prediction_audit GROUP BY model_name ORDER BY predictions DESC LIMIT 10",
+        "format": "table"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "Model Evaluation — MAE over Versions",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT created_at as time, AVG(ABS(predicted - actual)) as mae, model_name FROM model_evaluations WHERE created_at >= NOW() - INTERVAL '30 days' GROUP BY created_at, model_name ORDER BY created_at",
+        "format": "time_series"
+      }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" } } }
+    },
+    {
+      "id": 8,
+      "title": "Forecast Evaluations — SMAPE per Model",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT model_name, model_version, ROUND(AVG(ABS((predicted - actual) / NULLIF((ABS(actual) + ABS(predicted)) / 2, 0)) * 100)::numeric, 2) as smape FROM forecast_evaluations GROUP BY model_name, model_version ORDER BY smape ASC LIMIT 10",
+        "format": "table"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Recent Predictions (last 50)",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 8 },
+      "targets": [{
+        "datasource": "PostgreSQL",
+        "rawSql": "SELECT request_id, model_name, prediction, ROUND(latency_ms::numeric, 2) as latency_ms, timestamp FROM prediction_audit ORDER BY timestamp DESC LIMIT 50",
+        "format": "table"
+      }],
+      "options": { "sortBy": [{ "displayName": "timestamp", "desc": true }] }
+    }
+  ]
+}

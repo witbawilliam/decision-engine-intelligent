@@ -29,7 +29,7 @@ services:
     environment:
       - SERVICES=s3
       - DEFAULT_REGION=us-east-1
-      - PERSISTENCE=1 
+      - PERSISTENCE=1
       - ACTIVATE_PRO=0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
@@ -37,8 +37,93 @@ services:
       timeout: 5s
       retries: 5
     volumes:
-      - "./init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh"  
+      - "./init-s3.sh:/etc/localstack/init/ready.d/init-s3.sh"
       - ./localstack_data:/var/lib/localstack
+
+  #  MLflow tracking server 
+  mlflow:
+    build:
+      context: .
+      dockerfile: mlflow.Dockerfile
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://admin:password@db:5432/automl_db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+    #  Loki log aggregation
+  loki:
+    image: grafana/loki:3.0.0
+    command: -config.file=/etc/loki/loki-config.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+    # Grafana Alloy log collector 
+  alloy:
+    image: grafana/alloy:v1.3.1
+    command:
+      - run
+      - /etc/alloy/config.alloy
+      - --server.http.listen-addr=0.0.0.0:12345
+    ports:
+      - "12345:12345"
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy
+    depends_on:
+      loki:
+        condition: service_healthy
+
+
+  
+  grafana:
+    image: grafana/grafana:10.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      # Auto-provision Postgres as a datasource
+      - GF_DATASOURCES_DEFAULT_NAME=PostgreSQL
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
   api:
     build:
@@ -52,39 +137,37 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
 
-      
       - POSTGRES__URL=postgresql://admin:password@db:5432/automl_db
       - POSTGRES__POOL_SIZE=20
       - POSTGRES__POOL_PRE_PING=true
 
-      
       - REDIS__URL=redis://redis:6379/0
       - REDIS__MAX_CONNECTIONS=10
 
       - S3__ENDPOINT_URL=http://s3:4566
       - S3__BUCKET_NAME=ml-datasets
-      - S3_DATASETS_BUCKET=ml-datasets  
-      
+      - S3_DATASETS_BUCKET=ml-datasets
+
       - AWS_ACCESS_KEY_ID=testkey1
       - AWS_SECRET_ACCESS_KEY=testkey2
-      - AWS_REGION=us-east-1           
-      
+      - AWS_REGION=us-east-1
+
       - S3__ACCESS_KEY=testkey1
       - S3__SECRET_KEY=testkey2
       - S3__REGION=us-east-1
 
-
-      
       - CELERY__BROKER_URL=redis://redis:6379/0
       - CELERY__RESULT_BACKEND=redis://redis:6379/0
       - CELERY__TASK_SERIALIZER=json
       - CELERY__WORKER_CONCURRENCY=4
 
-      
       - APP_NAME=ML-Intelligence-Platform
+      - SERVICE_VERSION=1.0.0
       - ENVIRONMENT=development
       - LOG_LEVEL=INFO
       - ENABLE_TRACING=false
+
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
 
     depends_on:
       db:
@@ -92,6 +175,8 @@ services:
       redis:
         condition: service_healthy
       s3:
+        condition: service_healthy
+      mlflow:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live').read()"]
@@ -122,27 +207,29 @@ services:
 
       - S3__ENDPOINT_URL=http://s3:4566
       - S3__BUCKET_NAME=ml-datasets
-      - S3_DATASETS_BUCKET=ml-datasets  
-      
+      - S3_DATASETS_BUCKET=ml-datasets
+
       - AWS_ACCESS_KEY_ID=testkey1
       - AWS_SECRET_ACCESS_KEY=testkey2
-      - AWS_REGION=us-east-1           
-      
+      - AWS_REGION=us-east-1
+
       - S3__ACCESS_KEY=testkey1
       - S3__SECRET_KEY=testkey2
       - S3__REGION=us-east-1
 
-      
       - CELERY__BROKER_URL=redis://redis:6379/0
       - CELERY__RESULT_BACKEND=redis://redis:6379/0
       - CELERY__TASK_SERIALIZER=json
       - CELERY__WORKER_CONCURRENCY=4
 
-      
       - APP_NAME=ML-Intelligence-Platform
+      - SERVICE_VERSION=1.0.0
       - ENVIRONMENT=development
       - LOG_LEVEL=INFO
       - ENABLE_TRACING=false
+
+      # ── MLflow — worker logs every training run here 
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
 
     depends_on:
       redis:
@@ -151,25 +238,29 @@ services:
         condition: service_healthy
       s3:
         condition: service_healthy
+      mlflow:
+        condition: service_healthy
 
   ui:
     build:
       context: .
       target: runtime
-    
     command: streamlit run ui/dashboard.py --server.port=8501 --server.address=0.0.0.0
     ports:
       - "8501:8501"
     environment:
       - API_BASE_URL=http://api:8000
       - LOG_LEVEL=INFO
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
     depends_on:
       api:
-        condition: service_healthy 
+        condition: service_healthy
     volumes:
-      - .:/app 
+      - .:/app
 
 volumes:
-   postgres_data:      
-
-
+  postgres_data:
+  mlflow_artifacts:
+  grafana_data:
+  alloy_data:
+  loki_data:

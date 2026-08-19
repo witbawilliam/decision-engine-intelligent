@@ -351,3 +351,133 @@ def train_temporal_task(self, job_payload: dict) -> TaskResult:
             )
             logger.exception("Temporal pipeline failed", extra={"job_id": job_id})
             return _build_error_result(job_id, str(e))
+
+
+
+@shared_task(
+    bind=True,
+    base=TrainingTask,
+    name="workers.tasks_training.train_all_products_task",
+    queue="training",
+    time_limit=7200,
+    soft_time_limit=7100,
+    autoretry_for=(OSError, IOError),
+    max_retries=3,
+    retry_backoff=True,
+    retry_backoff_max=120,
+    retry_jitter=True,
+)
+def train_all_products_task(self, job_payload: dict) -> TaskResult:
+    """
+    Batch-trains one TemporalPipeline per unique product in the dataset.
+ 
+    Expected job_payload keys
+    -------------------------
+    s3_key          : S3 object key for the full dataset (parquet).
+    product_col     : Column that identifies each product (e.g. "product_id").
+    target_column   : Column to forecast (e.g. "revenue").
+    datetime_column : Date/time column (e.g. "date").
+    forecast_horizon: Optional int — default 30.
+    idempotency_key : Optional job ID.
+    """
+    from core.pipelines.temporal_pipeline import train_all_products
+ 
+    task_id  = self.request.id
+    job_id   = job_payload.get("idempotency_key") or task_id
+    progress = TaskProgressReporter(task=self, task_id=job_id)
+ 
+    # Mark job as running in PostgreSQL
+    PostgresClient.upsert(
+        table="jobs",
+        data={
+            "id":         job_id,
+            "status":     "running",
+            "progress":   0,
+            "updated_at": datetime.now(timezone.utc),
+        },
+        conflict_columns=["id"],
+    )
+ 
+    with RequestContext(trace_id=task_id):
+        try:
+            s3 = _build_s3_client()
+ 
+            #  Download dataset from S3 
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                local_path = os.path.join(tmp_dir, "batch_dataset.parquet")
+                s3.download_file(
+                    object_name=job_payload["s3_key"],
+                    local_path=local_path,
+                )
+ 
+                progress.report("loading_data", percent=10)
+                df = pl.scan_parquet(local_path).collect()
+ 
+                # Validate required keys 
+                product_col     = job_payload.get("product_col")
+                target_col      = job_payload.get("target_column")
+                datetime_col    = job_payload.get("datetime_column") or job_payload.get("time_column")
+ 
+                if not product_col:
+                    raise ValueError(f"Missing product_col. Got keys: {list(job_payload.keys())}")
+                if not target_col:
+                    raise ValueError(f"Missing target_column. Got keys: {list(job_payload.keys())}")
+                if not datetime_col:
+                    raise ValueError(f"Missing datetime_column. Got keys: {list(job_payload.keys())}")
+ 
+                config = TemporalPipelineConfig(
+                    forecast_horizon=job_payload.get("forecast_horizon", 30)
+                )
+ 
+                # Run batch training 
+                progress.report("training_products", percent=30)
+                results = train_all_products(
+                    full_df         = df,
+                    product_col     = product_col,
+                    target_column   = target_col,
+                    datetime_column = datetime_col,
+                    s3_client       = s3,
+                    config          = config,
+                )
+ 
+                progress.report("finalising", percent=90)
+ 
+            # Mark completed 
+            PostgresClient.upsert(
+                table="jobs",
+                data={
+                    "id":         job_id,
+                    "status":     "completed",
+                    "progress":   100,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                conflict_columns=["id"],
+            )
+ 
+            return {
+                "status":           STATUS_SUCCESS,
+                "task_id":          task_id,
+                "job_id":           job_id,
+                "products_trained": list(results.keys()),
+                "total_trained":    len(results),
+                "timestamp":        datetime.now(timezone.utc).isoformat(),
+            }
+ 
+        except Exception as e:
+            PostgresClient.upsert(
+                table="jobs",
+                data={
+                    "id":             job_id,
+                    "status":         "failed",
+                    "progress":       0,
+                    "updated_at":     datetime.now(timezone.utc),
+                    "error_message": str(e),
+                },
+                conflict_columns=["id"],
+            )
+            logger.exception(
+                "Batch product training failed",
+                extra={"job_id": job_id},
+            )
+            return _build_error_result(job_id, str(e))
+ 

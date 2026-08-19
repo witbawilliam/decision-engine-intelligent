@@ -228,8 +228,8 @@ class TabularPipeline(BasePipeline):
       
         self.processor = FeatureProcessor(
             target_column    = self.target_column,
-            problem_type     = self.problem_type,       # drives target casting + scaling advice
-            scaling_strategy = ScalingStrategy.NONE,    # XGBoost is scale-invariant
+            problem_type     = self.problem_type,       
+            scaling_strategy = ScalingStrategy.NONE,    
             leakage_threshold  = 0.995,
             variance_threshold = 0.0,
             null_threshold     = 0.90,

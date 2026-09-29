@@ -42,10 +42,20 @@ class ForecastingMetrics:
         self,
         y_true: Union[np.ndarray, list],
         y_pred: Union[np.ndarray, list],
-        y_train: Optional[np.ndarray] = None
+        y_train: Optional[np.ndarray] = None,
+        y_train_groups: Optional[Union[np.ndarray, list]] = None,
     ) -> ForecastMetricResult:
         """
         Entry point for batch evaluation. Performs sanity checks before computation.
+
+        y_train_groups: Optional entity/series identifier aligned 1:1 with y_train
+            (e.g. product IDs). When provided, MASE's naive seasonal-lag baseline
+            is computed WITHIN each group independently and then pooled — this
+            prevents spurious lag differences being computed across the boundary
+            between two unrelated series when y_train is a concatenated panel
+            (e.g. multiple products stacked into one array). If omitted, y_train
+            is treated as a single continuous series, which is only correct for
+            genuinely single-series data.
         """
 
         y_true = np.asarray(y_true).flatten().astype(np.float64)
@@ -81,7 +91,12 @@ class ForecastingMetrics:
         # Comparative Metric
         mase = None
         if y_train is not None:
-            mase = self._mase(y_true, y_pred, np.asarray(y_train).flatten())
+            mase = self._mase(
+                y_true,
+                y_pred,
+                np.asarray(y_train).flatten(),
+                groups=np.asarray(y_train_groups).flatten() if y_train_groups is not None else None,
+            )
 
         return ForecastMetricResult(
             mae=mae,
@@ -131,17 +146,55 @@ class ForecastingMetrics:
 
     
 
-    def _mase(self, y_true: np.ndarray, y_pred: np.ndarray, y_train: np.ndarray) -> Optional[float]:
+    def _mase(
+        self,
+        y_true: np.ndarray,
+        y_pred: np.ndarray,
+        y_train: np.ndarray,
+        groups: Optional[np.ndarray] = None,
+    ) -> Optional[float]:
         """
         MASE compares model error to a Naive seasonal forecast.
         MASE < 1 means the model is better than just guessing 'yesterday' or 'last season'.
+
+        If `groups` is provided, y_train is treated as a concatenation of
+        independent series (e.g. multiple products/entities). The seasonal-lag
+        diff (t vs t-m) is computed separately within each group's own
+        contiguous slice, then pooled across groups — this avoids computing a
+        nonsensical diff across the boundary where one entity's series ends
+        and the next one's begins in the flat array.
         """
         m = self.seasonal_period
-        if len(y_train) <= m:
-            logger.debug("MASE: y_train shorter than seasonal period.")
-            return None
-        naive_error = np.abs(y_train[m:] - y_train[:-m])
-        scale = np.mean(naive_error)
+
+        if groups is not None:
+            if len(groups) != len(y_train):
+                raise ValueError(
+                    f"y_train_groups length ({len(groups)}) must match y_train length ({len(y_train)})."
+                )
+
+            naive_errors = []
+            for group_id in np.unique(groups):
+                series = y_train[groups == group_id]
+                if len(series) <= m:
+                    logger.debug(
+                        "MASE: group '%s' has %d rows, too short for seasonal_period=%d — skipped.",
+                        group_id, len(series), m,
+                    )
+                    continue
+                naive_errors.append(np.abs(series[m:] - series[:-m]))
+
+            if not naive_errors:
+                logger.debug("MASE: no group had sufficient history for seasonal lag; MASE undefined.")
+                return None
+
+            scale = float(np.mean(np.concatenate(naive_errors)))
+
+        else:
+            if len(y_train) <= m:
+                logger.debug("MASE: y_train shorter than seasonal period.")
+                return None
+            naive_error = np.abs(y_train[m:] - y_train[:-m])
+            scale = float(np.mean(naive_error))
 
         if scale < 1e-9:
             return None 

@@ -43,16 +43,8 @@ class ForecastResult:
 
 
 class ProphetModel:
-    """
-    Production-ready wrapper around Facebook Prophet.
-
-    Example:
-        model = ProphetModel(time_column="date", target_column="revenue")
-        model.fit(train_df)
-        future = model.make_future_dataframe(periods=30)
-        result: ForecastResult = model.predict(future)
-        print(result.yhat[-7:])
-    """
+   
+    
 
     def __init__(
         self,
@@ -92,6 +84,7 @@ class ProphetModel:
             self.seasonality_mode, self.extra_regressors,
         )
 
+
     def _to_prophet_df(self, df: pd.DataFrame) -> pd.DataFrame:
         missing = [c for c in [self.time_column, self.target_column] if c not in df.columns]
         if missing:
@@ -117,6 +110,7 @@ class ProphetModel:
             prophet_df[reg] = df[reg].values
 
         return prophet_df
+    
 
     def _build_prophet(self) -> Prophet:
         model = Prophet(
@@ -133,6 +127,7 @@ class ProphetModel:
         for reg in self.extra_regressors:
             model.add_regressor(reg)
         return model
+
 
     def fit(self, df: pd.DataFrame) -> "ProphetModel":
         logger.info("[ProphetModel:%s] fit() — input shape: %s", self.model_id, df.shape)
@@ -157,6 +152,7 @@ class ProphetModel:
 
         logger.info("[ProphetModel:%s] Training complete — %d rows.", self.model_id, len(prophet_df))
         return self
+    
 
     def make_future_dataframe(
         self, periods: int, freq: str = "D", include_history: bool = False
@@ -165,6 +161,7 @@ class ProphetModel:
         return self._model.make_future_dataframe(
             periods=periods, freq=freq, include_history=include_history
         )
+
 
     def predict(self, future_df: pd.DataFrame) -> ForecastResult:
         self._assert_fitted("predict")
@@ -203,6 +200,7 @@ class ProphetModel:
             model_id       = self.model_id,
             regressor_cols = list(self.extra_regressors),
         )
+    
 
     def cross_validate(
         self,
@@ -217,6 +215,7 @@ class ProphetModel:
         if parallel: kwargs["parallel"] = parallel
         logger.info("[ProphetModel:%s] CV — horizon='%s'.", self.model_id, horizon)
         return cross_validation(**kwargs)
+    
 
     def cross_validation_metrics(
         self,
@@ -236,6 +235,7 @@ class ProphetModel:
             self.model_id, summary["rmse"], summary["mae"], summary["mape"],
         )
         return summary
+    
 
     def save(self, path: str) -> str:
         self._assert_fitted("save")
@@ -253,17 +253,20 @@ class ProphetModel:
         instance = joblib.load(abs_path)
         logger.info("[ProphetModel:%s] Loaded from '%s'.", instance.model_id, abs_path)
         return instance
+    
 
     def plot_components(self, forecast_df: pd.DataFrame) -> None:
         """Render component plots. Only use in notebooks, never in API workers."""
         self._assert_fitted("plot_components")
         self._model.plot_components(forecast_df)
 
+
     def _assert_fitted(self, caller: str) -> None:
         if not self._is_fitted or self._model is None:
             raise RuntimeError(
                 f"[ProphetModel:{self.model_id}] '{caller}' called before fit()."
             )
+
 
     def __repr__(self) -> str:
         status = "fitted" if self._is_fitted else "unfitted"

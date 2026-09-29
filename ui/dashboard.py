@@ -155,7 +155,7 @@ def dispatch_training(
         payload["forecast_horizon"] = (
             st.session_state.get(
                 "forecast_horizon",
-                30,
+                7,
             )
         )
 

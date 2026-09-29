@@ -18,7 +18,7 @@ def _create_app() -> Celery:
     app = Celery("automl_platform")
     app.config_from_object(CelerySettings)
 
-    task_modules = ["tasks_validation", "tasks_training"]
+    task_modules = ["tasks_validation", "tasks_training", "tasks_forecast_inference",]
     
     for module in task_modules:
         app.autodiscover_tasks(
@@ -42,7 +42,8 @@ def dispatch_automl_task(task_type: str, payload: dict[str, Any]) -> AsyncResult
     task_mapping = {
         "validate": "workers.tasks_validation.task_validation",
         "train": "workers.tasks_training.tabular_task",
-        "forecast":  "workers.tasks_training.train_all_products_task"
+        "forecast":  "workers.tasks_training.train_all_products_task",
+        "batch_forecast_predict":  "workers.tasks_forecast_inference.run_batch_forecast_task",
         
     }
     

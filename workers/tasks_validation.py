@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -14,12 +15,14 @@ from celery import Task, shared_task
 
 from core.contracts.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerTriggered
 from core.drift.drift_detector import DriftDetector, DriftReport
-from feedback.error_logger import ErrorLogger
 from core.evaluation.feature_importance import XGBExplainer, ExplanationResult
 from app.schemas.job_schema import V1, ALLOWED_TRANSITIONS, TERMINAL_STATUSES
+from feedback.error_logger import ErrorLogger
 from storage.postgres_client import PostgresClient
 from storage.s3_client import S3Client          
 from core.drift.statistical_tests import DriftStatistics
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -246,13 +249,12 @@ class TaskValidator:
                 continue
             try:
                 report[col] = DriftStatistics.full_report(ref_arr, cur_arr)
-            except Exception as exc:
-                result.warnings.append(f"Statistical tests failed for '{col}': {exc}")
+            except Exception as e:
+                result.warnings.append(f"Statistical tests failed for '{col}': {e}")
                 ErrorLogger.log_error(
                     component="TaskValidator.statistical_tests",
-                    error=exc,
+                    error=e,
                     context={"job_id": result.job_id, "feature": col},
-                    extra={"error_detail": str(exc)}
                 )
         result.statistical_report = report
         return result
@@ -266,11 +268,11 @@ class TaskValidator:
             )
             explanation = explainer.explain(current_df[feature_names])
             result.explanation = explanation
-        except Exception as exc:
-            result.warnings.append(f"Explainability skipped: {exc}")
+        except Exception as e:
+            result.warnings.append(f"Explainability skipped: {e}")
             ErrorLogger.log_error(
                 component="TaskValidator.explainability",
-                error=exc,
+                error=e,
                 context={"job_id": result.job_id},
             )
         return result

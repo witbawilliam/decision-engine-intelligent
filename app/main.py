@@ -44,7 +44,7 @@ from monitoring.health_checks import HealthChecker
 from storage.s3_client import S3Client
 
 from app.api.routes_upload    import router as upload_router
-from app.api.routes_jobs      import router as jobs_router
+from app.api.routes_jobs import router as jobs_dispatch_router, jobs_router as job_status_router
 from app.api.routes_inference import router as inference_router
 from app.api.routes_feedback  import router as feedback_router
 from monitoring.logging_config import get_logger, LoggingConfigurator, shutdown_logging
@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
         logger.warning("S3 not healthy at startup")
 
    
-    from service.prediction_service import PredictionService
+    from service.forecast_service import PredictionService
     from core.models.model_registry import ModelRegistry
     from storage.redis_client import RedisClient
     from storage.postgres_client import PostgresClient
@@ -110,7 +110,7 @@ async def lifespan(app: FastAPI):
         pg=pg,
     )
 
-    app.state.prediction_service = prediction_service
+    app.state.forecast_service = prediction_service
     logger.info("prediction_service_initialized")
 
    
@@ -186,8 +186,8 @@ async def _global_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 
 app.include_router(upload_router)
-
-app.include_router(jobs_router)
+app.include_router(jobs_dispatch_router)
+app.include_router(job_status_router)
 
 app.include_router(inference_router)
 

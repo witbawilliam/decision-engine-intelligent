@@ -47,6 +47,7 @@ def _env_json(key: str, default: dict) -> dict:
 _default_exchange  = Exchange("default",  type="direct")
 _training_exchange = Exchange("training", type="direct")
 _validation_exchange = Exchange("validation", type="direct")
+_inference_exchange = Exchange("inference", type="direct")
 
 
 
@@ -113,6 +114,7 @@ class CelerySettings:
             exchange=_training_exchange,
             routing_key="training",
         ),
+        Queue("inference",   exchange=_inference_exchange,   routing_key="inference"),
     )
 
     
@@ -134,8 +136,12 @@ class CelerySettings:
 
         "workers.tasks_training.temporal_task":{
             "queue": "training",
-            "routing_key": "training"
-        }
+            "routing_key": "training",
+        },
+
+        "workers.tasks_forecast_inference.run_batch_forecast_task": {
+                "queue": "inference", "routing_key": "inference",
+        },
        
     }
 

@@ -50,7 +50,7 @@ from app.api.routes_inference import router, get_prediction_service
 from app.schemas.prediction_schema import PredictionStatus
 
 
-from service.prediction_service import PredictionResponse as ServiceResponse
+from service.forecast_service import PredictionResponse as ServiceResponse
 
 
 @pytest.fixture

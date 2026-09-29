@@ -35,21 +35,9 @@ class PipelineResult:
 
 
 
-# ENTERPRISE BASE PIPELINE
-
 
 class BasePipeline(ABC):
-    """
-    Enterprise ML Pipeline Template.
-
-    Guarantees:
-    - Deterministic step ordering
-    - Telemetry + execution tracing
-    - State safety
-    - Immutable outputs
-    """
-
-
+   
 
     def __init__(
         self,
@@ -84,9 +72,9 @@ class BasePipeline(ABC):
     
 
     def run(self) -> PipelineResult:
-        """
-        Orchestrates full pipeline lifecycle.
-        """
+        
+        # Orchestrates full pipeline lifecycle.
+        
 
         if self.is_fitted:
             raise RuntimeError("Pipeline instance has already been executed.")
@@ -139,7 +127,7 @@ class BasePipeline(ABC):
 
 
     def _execution_plan(self):
-        """Defines deterministic execution order."""
+        # Defines deterministic execution order
         return [
             ("validation", self._validate),
             ("problem_detection", self._detect_problem_type),
@@ -149,7 +137,8 @@ class BasePipeline(ABC):
         ]
 
     def _execute_step(self, name: str, func) -> None:
-        """Centralized step executor with telemetry."""
+        # Centralized step executor with telemetry
+
         self.logger.info(f"Executing step: {name}")
         start = time.perf_counter()
 
@@ -161,7 +150,7 @@ class BasePipeline(ABC):
         self.logger.info(f"Step '{name}' completed in {duration:.4f}s")
 
     def _execute_evaluation(self) -> Dict[str, float]:
-        """Runs evaluation in isolated telemetry context."""
+        # Runs evaluation in isolated telemetry context
         start = time.perf_counter()
 
         if self.problem_type is None:
@@ -175,14 +164,14 @@ class BasePipeline(ABC):
         return metrics
 
     def _safe_collect_artifacts(self) -> Dict[str, Any]:
-        """Ensures artifact dictionary is always safe."""
+        # Ensures artifact dictionary is always safe
         artifacts = self._collect_artifacts() or {}
         if not isinstance(artifacts, dict):
             raise TypeError("_collect_artifacts must return a dictionary.")
         return artifacts
 
     def _collect_system_info(self) -> Dict[str, str]:
-        """Captures runtime environment metadata."""
+        # Captures runtime environment metadata
         return {
             "python_version": platform.python_version(),
             "platform": platform.platform(),

@@ -13,7 +13,7 @@ from core.pipelines.base_pipeline import BasePipeline
 from core.contracts.schema_inference import SchemaInference
 from core.contracts.schema_validator import SchemaValidator
 from core.feature_engineering.data_quality import DataQualityAnalyzer
-from core.feature_engineering.preprocessing_utils import FeatureProcessor, ScalingStrategy,  ImputationStrategy
+from core.feature_engineering.preprocessing_utils import FeatureProcessor,  ImputationStrategy
 from core.models.xgboost_model import XGBoostModel
 from core.evaluation.regression_metrics import RegressionMetrics
 from core.evaluation.feature_importance import XGBExplainer
@@ -69,10 +69,7 @@ class TabularPipeline(BasePipeline):
     
 
     def execute_pipeline(self, model_name: str) -> PipelineResult:
-            """
-            The entry point for the pipeline execution.
-            This orchestrates the private methods in the correct order.
-            """
+
             logger.info(f"Starting pipeline execution for model: {model_name}")
 
             try:
@@ -168,15 +165,7 @@ class TabularPipeline(BasePipeline):
 
 
     def _validate(self) -> None:
-        """
-        Validation flow:
-          Detect problem type
-          Infer schema
-          Validate schema contract
-          Data quality audit
-        """
-
-        
+       
         schema_engine = SchemaInference(
             df=self.df,
             target_column=self.target_column,
@@ -229,7 +218,6 @@ class TabularPipeline(BasePipeline):
         self.processor = FeatureProcessor(
             target_column    = self.target_column,
             problem_type     = self.problem_type,       
-            scaling_strategy = ScalingStrategy.NONE,    
             leakage_threshold  = 0.995,
             variance_threshold = 0.0,
             null_threshold     = 0.90,

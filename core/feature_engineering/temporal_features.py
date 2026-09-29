@@ -20,7 +20,9 @@ class TemporalFeatureEngineer:
     """
     Transforms raw Timestamps into high-dimensional feature vectors.
     """
-    
+
+    _TEMPORAL_DTYPES = (pl.Date, pl.Datetime)
+
     def __init__(self, config: Optional[TemporalFeatureConfig] = None):
         self.config = config or TemporalFeatureConfig()
 
@@ -29,8 +31,26 @@ class TemporalFeatureEngineer:
         Applies a vectorized transformation pipeline to specified datetime columns.
         Formula Name: Temporal Signal Decomposition
         """
-        expressions = []
         
+        missing = [c for c in date_cols if c not in df.columns]
+        if missing:
+            raise KeyError(
+                f"TemporalFeatureEngineer.transform: column(s) {missing} not found "
+                f"in dataframe. Available columns: {df.columns}"
+            )
+
+        non_temporal = [
+            c for c in date_cols if df.schema[c] not in self._TEMPORAL_DTYPES
+        ]
+        if non_temporal:
+            raise TypeError(
+                f"TemporalFeatureEngineer.transform: column(s) {non_temporal} are not "
+                f"Date/Datetime dtype (got {[str(df.schema[c]) for c in non_temporal]}). "
+                "Parse these columns to a temporal dtype before calling transform()."
+            )
+
+        expressions = []
+
         for col in date_cols:
             expressions.extend([
                 pl.col(col).dt.year().alias(f"{col}_year"),
@@ -45,14 +65,13 @@ class TemporalFeatureEngineer:
                     pl.col(col).dt.minute().alias(f"{col}_minute"),
                 ])
 
-            # 2. Boolean Flags (Interaction Features)
+           
             if self.config.add_is_weekend:
-                # Math: Weekday >= 6 (Saturday=6, Sunday=7 in Polars)
                 expressions.append(
                     (pl.col(col).dt.weekday() >= 6).alias(f"{col}_is_weekend")
                 )
 
-            # 3. Cyclic Encoding (Trigonometric Features)
+            # Cyclic Encoding (Trigonometric Features)
             if self.config.add_cyclic_signals:
                 expressions.extend(self._get_cyclic_exprs(col))
 
@@ -63,13 +82,11 @@ class TemporalFeatureEngineer:
         Encodes time as a circle to maintain distance integrity (e.g., Dec to Jan).
         Formula: x_sin = sin(2 * pi * x / max_x)
         """
-        # Define periods for normalization
-        # We use pl.col().dt.month() which is 1-indexed
         return [
             # Monthly Cycle
             (pl.col(col).dt.month() * (2 * np.pi / 12)).sin().alias(f"{col}_month_sin"),
             (pl.col(col).dt.month() * (2 * np.pi / 12)).cos().alias(f"{col}_month_cos"),
-            
+
             # Weekday Cycle
             (pl.col(col).dt.weekday() * (2 * np.pi / 7)).sin().alias(f"{col}_weekday_sin"),
             (pl.col(col).dt.weekday() * (2 * np.pi / 7)).cos().alias(f"{col}_weekday_cos"),

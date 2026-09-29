@@ -56,7 +56,6 @@ CREATE TABLE IF NOT EXISTS prediction_audit (
 _CREATE_PREDICTION_FILES_SQL = """
 CREATE TABLE IF NOT EXISTS prediction_files (
     id SERIAL PRIMARY KEY,
-
     job_id TEXT NOT NULL,
     model_name TEXT NOT NULL,
     model_version TEXT,
@@ -99,6 +98,25 @@ CREATE INDEX IF NOT EXISTS idx_fe_model_name ON forecast_evaluations (model_name
 CREATE INDEX IF NOT EXISTS idx_fe_date ON forecast_evaluations (prediction_date);
 """
 
+_CREATE_FORECAST_PREDICTIONS_SQL = """
+CREATE TABLE IF NOT EXISTS forecast_predictions (
+    id              SERIAL PRIMARY KEY,
+    job_id          TEXT NOT NULL,
+    product_id      TEXT NOT NULL,
+    model_name      TEXT NOT NULL,
+    model_version   TEXT NOT NULL,
+    prediction_date TEXT NOT NULL,
+    yhat            DOUBLE PRECISION NOT NULL,
+    yhat_lower      DOUBLE PRECISION,
+    yhat_upper      DOUBLE PRECISION,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_fp_job_id ON forecast_predictions (job_id);
+CREATE INDEX IF NOT EXISTS idx_fp_model_name ON forecast_predictions (model_name);
+CREATE INDEX IF NOT EXISTS idx_fp_product_id ON forecast_predictions (product_id);
+CREATE INDEX IF NOT EXISTS idx_fp_prediction_date ON forecast_predictions (prediction_date);
+"""
+
 
 class ModelRegistry:
    
@@ -117,11 +135,7 @@ class ModelRegistry:
         self._s3_prefix = s3_prefix.rstrip("/")
         self._ensure_table()
 
-        try:
-            PostgresClient.execute("ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS training_data_key TEXT;")
-            logger.info("Successfully migrated model_registry schema with tracking column.")
-        except Exception as migration_error:
-            logger.warning(f"Migration check completed or skipped: {migration_error}")
+       
             
     def _sanitize(self, obj: Any) -> Any:
         """Recursively replace NaN or Infinity with None for JSON compliance."""
@@ -163,66 +177,73 @@ class ModelRegistry:
         problem_type: str,
         training_data_key: str | None = None,
         stage: str = "staging",
+        preprocessor: Any = None,   # NEW
     ) -> Dict[str, Any]:
         """
         Serialize *model*, upload it to S3, and record metadata in Postgres.
+        If *preprocessor* is provided (a fitted FeatureProcessor), it's pickled
+        and uploaded alongside the model so inference can reproduce identical
+        imputation/encoding/scaling on new data -- without this, transform()
+        at inference time would either be impossible or silently use different
+        fill values / encoding maps than what the model was trained on.
         """
-        # Parse inputs to isolate human-readable names from data URI structures
         model_name, training_data_key = self._parse_registration_path(model_name, training_data_key)
-
         clean_metrics = self._sanitize(metrics)
         clean_parameters = self._sanitize(parameters)
 
         version = self._next_version(model_name)
         artifact_key = self._artifact_key(model_name, version)
         run_id = str(uuid.uuid4())
-        
+
         model_bytes = pickle.dumps(model)
         self._s3._client.put_object(
-            Bucket=self._s3.bucket_name,
-            Key=artifact_key,
-            Body=model_bytes,
+            Bucket=self._s3.bucket_name, Key=artifact_key, Body=model_bytes,
             ContentType="application/octet-stream",
-            Metadata={
-                "model_name": model_name,
-                "version": str(version),
-                "run_id": run_id,
-            },
+            Metadata={"model_name": model_name, "version": str(version), "run_id": run_id},
         )
-        logger.info(
-            "Model artifact uploaded",
-            extra={"bucket": self._s3.bucket_name, "key": artifact_key},
-        )
+        logger.info("Model artifact uploaded", extra={"bucket": self._s3.bucket_name, "key": artifact_key})
 
-        # Persist metadata to Postgres 
+        preprocessor_key = None
+        if preprocessor is not None:
+            preprocessor_key = self._preprocessor_key(model_name, version)
+            try:
+                preprocessor_bytes = pickle.dumps(preprocessor)
+                self._s3._client.put_object(
+                    Bucket=self._s3.bucket_name, Key=preprocessor_key, Body=preprocessor_bytes,
+                    ContentType="application/octet-stream",
+                    Metadata={"model_name": model_name, "version": str(version), "run_id": run_id},
+                )
+                logger.info(
+                    "Preprocessor artifact uploaded",
+                    extra={"bucket": self._s3.bucket_name, "key": preprocessor_key},
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to upload preprocessor for '%s' v%s -- inference will not "
+                    "be able to reproduce training-time cleaning for this version.",
+                    model_name, version,
+                )
+                preprocessor_key = None  # don't record a key that was never actually written
+
         row = PostgresClient.execute(
             """
             INSERT INTO model_registry
                 (run_id, model_name, version, stage, problem_type,
-                 metrics, parameters, artifact_key, training_data_key, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                metrics, parameters, artifact_key, training_data_key, preprocessor_key, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
-                run_id,
-                model_name,
-                version,
-                stage,
-                problem_type,
-                json.dumps(clean_metrics),
-                json.dumps(clean_parameters),
-                artifact_key,
-                training_data_key,
+                run_id, model_name, version, stage, problem_type,
+                json.dumps(clean_metrics), json.dumps(clean_parameters),
+                artifact_key, training_data_key, preprocessor_key,
                 datetime.utcnow(),
             ),
             returning=True,
         )
 
-        logger.info(
-            "Model registered",
-            extra={"model_name": model_name, "version": version, "stage": stage},
-        )
-        return row  # type: ignore[return-value]
+        logger.info("Model registered", extra={"model_name": model_name, "version": version, "stage": stage})
+        return row
 
     def load(
         self,
@@ -275,6 +296,36 @@ class ModelRegistry:
 
         data = response["Body"].read()
         return pl.read_parquet(io.BytesIO(data))
+
+    def load_preprocessor(
+        self,
+        model_name: str,
+        version: Optional[int] = None,
+        stage: Optional[str] = None,
+    ) -> Any:
+        """Download and deserialize the fitted FeatureProcessor for a model
+        version. Returns None if no preprocessor was registered for it (e.g.
+        older versions registered before this feature existed)."""
+        meta = self._resolve_metadata(model_name, version=version, stage=stage)
+        preprocessor_key = meta.get("preprocessor_key")
+
+        if not preprocessor_key:
+            logger.warning(
+                "No preprocessor artifact recorded for '%s' v%s -- was it "
+                "registered before preprocessor persistence was added?",
+                model_name, meta["version"],
+            )
+            return None
+
+        response = self._s3._client.get_object(Bucket=self._s3.bucket_name, Key=preprocessor_key)
+        preprocessor_bytes = response["Body"].read()
+        preprocessor = pickle.loads(preprocessor_bytes)
+
+        logger.info(
+            "Preprocessor loaded",
+            extra={"model_name": model_name, "version": meta["version"], "stage": meta.get("stage")},
+        )
+        return preprocessor
 
     def promote(
         self,
@@ -351,12 +402,24 @@ class ModelRegistry:
         PostgresClient.execute(_CREATE_PREDICTION_FILES_SQL)
         PostgresClient.execute(_CREATE_MODEL_EVALUATIONS_SQL)
         PostgresClient.execute(_CREATE_FORECAST_EVALUATIONS_SQL)
+        PostgresClient.execute(_CREATE_FORECAST_PREDICTIONS_SQL)
 
         logger.debug("model_registry table ensured")
         logger.debug("prediction_audit table ensured")
 
+        try:
+
+            PostgresClient.execute("ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS training_data_key TEXT;")
+            PostgresClient.execute("ALTER TABLE model_registry ADD COLUMN IF NOT EXISTS preprocessor_key TEXT;")
+            logger.info("Successfully migrated model_registry schema with tracking column.")
+        except Exception as migration_error:
+            logger.warning(f"Migration check completed or skipped: {migration_error}")
+
     def _artifact_key(self, model_name: str, version: int) -> str:
         return f"{self._s3_prefix}/{model_name}/v{version}/model.pkl"
+
+    def _preprocessor_key(self, model_name: str, version: int) -> str:
+        return f"{self._s3_prefix}/{model_name}/v{version}/preprocessor.pkl"
     
     def _training_sample_key(
         self,
@@ -413,3 +476,63 @@ class ModelRegistry:
                 f"version={version!r}, stage={stage!r}."
             )
         return rows[0]
+
+    def list_product_models(self, stage: str = "production", prefix: str = "prophet_product_") -> list[str]:
+        """Return product_ids (prefix stripped) for every model_name currently at `stage`."""
+        rows = PostgresClient.query(
+            "SELECT DISTINCT model_name FROM model_registry WHERE stage = %s AND model_name LIKE %s",
+            (stage, f"{prefix}%"),
+        )
+        return [r["model_name"].removeprefix(prefix) for r in rows]
+
+    def save_forecast_results(
+        self,
+        results: Dict[str, Dict[str, Any]],
+        job_id: str,
+    ) -> int:
+    
+        rows_written = 0
+
+        for product_id, entry in results.items():
+            if entry.get("status") != "success":
+                continue
+
+            result = entry["result"]  # ForecastServiceResult
+            forecast_df = result.forecast
+
+            for _, row in forecast_df.iterrows():
+                try:
+                    yhat_lower = row.get("yhat_lower")
+                    yhat_upper = row.get("yhat_upper")
+                    PostgresClient.execute(
+                        """
+                        INSERT INTO forecast_predictions
+                            (job_id, product_id, model_name, model_version,
+                            prediction_date, yhat, yhat_lower, yhat_upper)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            job_id,
+                            product_id,
+                            result.model_name,
+                            result.model_version,
+                            str(row["ds"]),
+                            float(row["yhat"]),
+                            float(yhat_lower) if yhat_lower is not None else None,
+                            float(yhat_upper) if yhat_upper is not None else None,
+                        ),
+                    )
+                    rows_written += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to write forecast_predictions row for product_id=%s, "
+                        "job_id=%s, date=%s -- continuing with remaining rows.",
+                        product_id, job_id, row.get("ds"),
+                    )
+                    continue  # one bad row shouldn't abort the whole product's write
+
+        logger.info(
+            "Saved %d forecast prediction row(s) for job_id=%s across %d product(s).",
+            rows_written, job_id, sum(1 for e in results.values() if e.get("status") == "success"),
+        )
+        return rows_written

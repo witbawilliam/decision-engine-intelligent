@@ -1,128 +1,266 @@
-from typing import Any, Dict, Optional
+import os
+import tempfile
+import uuid
+from typing import List, Optional
 
-from fastapi import (
-    APIRouter,
-    Depends,
-    HTTPException,
-    Query,
-    Request,
-    status,
-)
-from pydantic import BaseModel, Field
+import polars as pl
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel
 
-from service.prediction_service import (
-    PredictionService,
-    PredictionRequest,
-    PredictionResponse,
-)
-
-router = APIRouter(
-    prefix="/v1/inference",
-    tags=["Inference Engine"],
-)
+from app.config import get_settings
+from service.forecast_service import PredictionService, ForecastServiceError
+from storage.s3_client import S3Client
+from workers.tasks_forecast_inference import run_batch_forecast_task
 
 
-class InferencePayloadSchema(BaseModel):
-    model_name: str = Field(..., example="auto_forecasting_model")
-    features:   Dict[str, Any] = Field(..., example={"feature_1": 12.5})
-    request_id: Optional[str]   = None
-    trace_id:   Optional[str]   = None
-    include_explanations: bool  = False
-    lever_col:   Optional[str]   = None
-    target_goal: Optional[float] = None
-    lever_min:   Optional[float] = None
-    lever_max:   Optional[float] = None
+router = APIRouter(prefix="/v1/forecast", tags=["Forecast Inference"])
 
 
-def get_prediction_service(request: Request) -> PredictionService:
-    service = getattr(request.app.state, "prediction_service", None)
+class ForecastRequestSchema(BaseModel):
+    periods: Optional[int] = None
+
+
+class BatchForecastRequestSchema(BaseModel):
+    forecast_horizon: Optional[int] = None
+    idempotency_key: Optional[str] = None
+
+
+class BatchForecastResponseSchema(BaseModel):
+    job_id: str
+    task_id: str
+    status: str
+
+
+# ── CSV-driven synchronous batch forecast ────────────────────────────────
+#
+# Deliberately separate from /batch (the Celery/all-production-models path).
+# See module docstring on forecast_batch_from_csv() for why.
+
+_MAX_SYNC_PRODUCTS = 100000  # HTTP-request safety cap -- see endpoint docstring
+
+
+class BatchCsvForecastRequestSchema(BaseModel):
+    s3_key: str
+    product_id_column: str = "product_id"
+    periods: Optional[int] = None
+
+
+class ProductForecastResult(BaseModel):
+    product_id: str
+    status: str  # "success" | "failed"
+    model_name: Optional[str] = None
+    model_version: Optional[str] = None
+    periods: Optional[int] = None
+    forecast: Optional[List[dict]] = None
+    error: Optional[str] = None
+
+
+class BatchCsvForecastResponseSchema(BaseModel):
+    total_products: int
+    succeeded: int
+    failed: int
+    results: List[ProductForecastResult]
+
+
+def get_s3_client() -> S3Client:
+    """
+    Mirrors app/api/routes_upload.py's get_s3_client() so uploaded CSVs and
+    this download path always resolve to the same bucket/credentials.
+    """
+    settings = get_settings()
+    access_key = os.getenv("AWS_ACCESS_KEY_ID") or settings.s3.access_key
+    secret_key = os.getenv("AWS_SECRET_ACCESS_KEY") or settings.s3.secret_key
+
+    if not access_key or not secret_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="S3 credentials not configured.",
+        )
+
+    return S3Client(
+        bucket_name=os.getenv("S3_DATASETS_BUCKET", settings.s3.bucket_name),
+        endpoint_url=settings.s3.boto3_endpoint(),
+        access_key=access_key,
+        secret_key=secret_key,
+        region=settings.s3.region,
+    )
+
+
+def get_forecast_service(request: Request) -> PredictionService:
+    service = getattr(request.app.state, "forecast_service", None)
     if service is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Prediction service not initialized.",
+            detail="Forecast service not initialized.",
         )
     return service
 
 
-@router.post("/predict", response_model=PredictionResponse, status_code=status.HTTP_200_OK)
-async def execute_model_inference(
-    payload: InferencePayloadSchema,
-    request: Request,
-    service: PredictionService = Depends(get_prediction_service),
+@router.post("/predict/{product_id}", status_code=status.HTTP_200_OK)
+async def forecast_product(
+    product_id: str,
+    payload: ForecastRequestSchema,
+    service: PredictionService = Depends(get_forecast_service),
 ):
     try:
-        request_obj = PredictionRequest(
-            model_name           = payload.model_name,
-            features             = payload.features,
-            include_explanations = payload.include_explanations,
-            **( {"request_id": payload.request_id} if payload.request_id else {} ),
-            **( {"trace_id":   payload.trace_id}   if payload.trace_id   else {} ),
-            lever_col   = payload.lever_col,
-            target_goal = payload.target_goal,
-            lever_min   = payload.lever_min,
-            lever_max   = payload.lever_max,
-        )
-        return await service.predict(request_obj)
-
-    except ValueError as exc:
+        result = service.run(product_id=product_id, periods=payload.periods)
+        return {
+            "product_id": result.product_id,
+            "model_name": result.model_name,
+            "model_version": result.model_version,
+            "periods": result.periods,
+            "generated_at": result.generated_at,
+            "forecast": result.forecast.to_dict(orient="records"),
+        }
+    except ForecastServiceError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except KeyError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except TimeoutError:
-        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Prediction timeout.")
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Inference failed: {str(exc)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Forecast failed: {exc}")
 
 
-@router.get("/predictions/{model_name}", status_code=status.HTTP_200_OK)
-async def get_model_predictions(
-    model_name: str,
-    request:    Request,
-    version:    Optional[str] = Query(None),
-    limit:      int           = Query(100),
-    offset:     int           = Query(0),
-    service:    PredictionService = Depends(get_prediction_service),
-):
+@router.post(
+    "/batch",
+    response_model=BatchForecastResponseSchema,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def forecast_batch(payload: BatchForecastRequestSchema):
+    """
+    Triggers an async batch forecast across every product currently at
+    stage='production'. Returns immediately with a job_id -- the actual
+    work runs in a Celery worker via run_batch_forecast_task, since
+    forecasting 100+ products sequentially would risk HTTP timeouts if
+    done synchronously in the request/response cycle.
+    """
+    job_id = payload.idempotency_key or str(uuid.uuid4())
+
+    job_payload = {
+        "forecast_horizon": payload.forecast_horizon,
+        "idempotency_key":  job_id,
+    }
+
     try:
-        return await service.get_model_predictions(
-            model_name = model_name,
-            version    = version,
-            limit      = limit,
-            offset     = offset,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        async_result = run_batch_forecast_task.delay(job_payload)
     except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch predictions: {str(exc)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to enqueue batch forecast task: {exc}",
+        )
+
+    return BatchForecastResponseSchema(
+        job_id=job_id,
+        task_id=async_result.id,
+        status="queued",
+    )
 
 
-@router.get("/audit/{model_name}", status_code=status.HTTP_200_OK)
-async def get_prediction_audit(
-    model_name: str,
-    request:    Request,
-    limit:      int = Query(100),
-    offset:     int = Query(0),
-    service:    PredictionService = Depends(get_prediction_service),
+@router.post(
+    "/batch-from-csv",
+    response_model=BatchCsvForecastResponseSchema,
+    status_code=status.HTTP_200_OK,
+)
+async def forecast_batch_from_csv(
+    payload: BatchCsvForecastRequestSchema,
+    service: PredictionService = Depends(get_forecast_service),
+    s3: S3Client = Depends(get_s3_client),
 ):
-    try:
-        return await service.get_prediction_audit(
-            model_name = model_name,
-            limit      = limit,
-            offset     = offset,
+    
+    with tempfile.TemporaryDirectory() as tmp_dir:
+       
+        ext = os.path.splitext(payload.s3_key)[1].lower()
+        local_path = os.path.join(tmp_dir, f"products{ext or '.csv'}")
+
+        try:
+            s3.download_file(object_name=payload.s3_key, local_path=local_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Could not download '{payload.s3_key}' from S3: {exc}",
+            )
+
+        try:
+            if ext == ".parquet":
+                df = pl.read_parquet(local_path)
+            elif ext in (".xlsx", ".xls"):
+                df = pl.read_excel(local_path)
+            else:
+                df = pl.read_csv(local_path)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Could not parse '{payload.s3_key}' as "
+                    f"{ext.lstrip('.').upper() or 'CSV'}: {exc}"
+                ),
+            )
+
+    if payload.product_id_column not in df.columns:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Column '{payload.product_id_column}' not found in uploaded file. "
+                f"Available columns: {df.columns}"
+            ),
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to fetch audit logs: {str(exc)}")
+
+    product_ids = (
+        df[payload.product_id_column]
+        .cast(pl.Utf8, strict=False)
+        .drop_nulls()
+        .unique()
+        .to_list()
+    )
+
+    if not product_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No product identifiers found in column '{payload.product_id_column}'.",
+        )
+
+    if len(product_ids) > _MAX_SYNC_PRODUCTS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{len(product_ids)} unique products found, exceeding the synchronous "
+                f"limit of {_MAX_SYNC_PRODUCTS}. This endpoint is designed for small, "
+                "curated lists -- for larger batches, the async /batch endpoint needs "
+                "its ModelRegistry.save_forecast_results dependency fixed first."
+            ),
+        )
+
+    results: List[ProductForecastResult] = []
+    for product_id in product_ids:
+        try:
+            result = service.run(product_id=product_id, periods=payload.periods)
+            results.append(
+                ProductForecastResult(
+                    product_id=product_id,
+                    status="success",
+                    model_name=result.model_name,
+                    model_version=result.model_version,
+                    periods=result.periods,
+                    forecast=result.forecast.to_dict(orient="records"),
+                )
+            )
+        except ForecastServiceError as exc:
+            results.append(
+                ProductForecastResult(product_id=product_id, status="failed", error=str(exc))
+            )
+        except Exception as exc:
+            results.append(
+                ProductForecastResult(
+                    product_id=product_id, status="failed", error=f"Unexpected error: {exc}"
+                )
+            )
+
+    succeeded = sum(1 for r in results if r.status == "success")
+    return BatchCsvForecastResponseSchema(
+        total_products=len(results),
+        succeeded=succeeded,
+        failed=len(results) - succeeded,
+        results=results,
+    )
 
 
 @router.get("/health", status_code=status.HTTP_200_OK)
-async def health(
-    request: Request,
-    service: PredictionService = Depends(get_prediction_service),
-):
-    return {
-        "status":       "healthy",
-        "service":      "prediction",
-        "cache_models": len(service._model_cache),
-    }
+async def health(service: PredictionService = Depends(get_forecast_service)):
+    return {"status": "healthy", "service": "forecast"}

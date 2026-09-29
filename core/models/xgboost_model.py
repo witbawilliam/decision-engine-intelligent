@@ -47,11 +47,7 @@ class ModelResult:
             "inference_time_ms": self.inference_time_ms
         }
 class XGBoostModel:
-    """
-    Enterprise-grade XGBoost Wrapper.
-    Supports native Polars integration, automatic categorical detection, 
-    and model persistence.
-    """
+   
 
     def __init__(
         self,
@@ -72,7 +68,7 @@ class XGBoostModel:
         
 
     def _initialize_model(self) -> Union[XGBClassifier, XGBRegressor]:
-        """Initializes the model with production-optimized defaults."""
+        
         # Formulas
         default_params = {
             "n_estimators": 500,
@@ -188,7 +184,7 @@ class XGBoostModel:
         )
 
     def _get_feature_importance(self) -> Dict[str, float]:
-        """Extracts Gain-based importance (Enterprise Standard)."""
+        """Extracts Gain-based importance."""
         if not self._is_fitted or self.feature_names is None:
             return {}
         
@@ -206,8 +202,6 @@ class XGBoostModel:
     
 
     
-    # PERSISTENCE (The Enterprise Key)
-    
 
     def save(self, path: Union[str, Path]) -> None:
         """Serializes the model to disk."""
@@ -216,7 +210,8 @@ class XGBoostModel:
         joblib.dump(self, path)
         logger.info(f"Model saved to {path}")
 
+
     @staticmethod
     def load(path: Union[str, Path]) -> XGBoostModel:
-        """Loads a model from disk."""
+        # Loads a model from disk.
         return joblib.load(path)

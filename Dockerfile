@@ -1,4 +1,3 @@
-
 FROM python:3.11-slim AS builder
 
 
@@ -46,6 +45,10 @@ COPY ./app ./app
 COPY ./core ./core
 COPY ./workers ./workers
 COPY ./storage ./storage
+COPY ./feedback ./feedback
+COPY ./monitoring ./monitoring
+COPY ./service ./service
+COPY ./ui ./ui
 
 
 RUN useradd -m mluser && chown -R mluser /app

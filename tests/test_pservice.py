@@ -71,9 +71,9 @@ for _mod in _STUBS:
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()
 
-import service.prediction_service as _ps_module   # noqa: E402 — keep the module object
+import service.forecast_service as _ps_module   # noqa: E402 — keep the module object
 
-from service.prediction_service import (           # noqa: E402
+from service.forecast_service import (           # noqa: E402
     PredictionService,
     PredictionRequest,
     PredictionResponse,

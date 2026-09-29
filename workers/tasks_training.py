@@ -31,31 +31,6 @@ STATUS_ERROR   = "ERROR"
 
 
 
-@dataclass
-class TaskProgressReporter:
-
-    task: Task
-    task_id: str
-
-    def report(self, step: str, percent: int) -> None:
-
-        payload = V1.JobStatusResponse(
-            job_id=self.task_id,
-            status="running",
-            progress=percent,
-            updated_at=datetime.now(timezone.utc)
-        )
-
-        self.task.update_state(
-            state="PROGRESS",
-            meta=payload.model_dump
-        )
-        logger.debug(
-            "Task progress reported",
-            extra=payload.model_dump(),
-        )
-
-
 
 
 def _load_data(dataset_path: str) -> pl.LazyFrame:
@@ -64,10 +39,7 @@ def _load_data(dataset_path: str) -> pl.LazyFrame:
 
 
 def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
-    """
-    Bridges the PipelineResult to V1.JobResultResponse.
-
-    """
+   
     version = getattr(result, "model_version", "1")
 
     if "." not in str(version):
@@ -94,11 +66,7 @@ def _build_success_result(task_id: str, result: PipelineResult) -> TaskResult:
 
 
 def _build_error_result(task_id: str, message: str) -> TaskResult:
-    """
-    Constructs a standardized error payload.
-    In a real V1 schema, you might eventually create a V1.ErrorResponse,
-    but for now, we maintain the contract.
-    """
+    
     return {
         "status": STATUS_ERROR,
         "task_id": task_id,
@@ -135,9 +103,9 @@ class TaskProgressReporter:
         
         self.task.update_state(
             state="PROGRESS",
-            meta=payload.model_dump()
+            meta=payload.model_dump(mode="json")
         )
-        logger.debug("Task progress reported", extra=payload.model_dump())
+        logger.debug("Task progress reported", extra=payload.model_dump(mode="json"))
 
 
 
@@ -201,6 +169,7 @@ class TrainingTask(Task):
     retry_backoff_max=120,
     retry_jitter=True,
 )
+
 def train_tabular_task(self, job_payload: dict) -> TaskResult:
     task_id = self.request.id
     job_id  = job_payload.get("idempotency_key") or task_id
@@ -265,7 +234,7 @@ def train_tabular_task(self, job_payload: dict) -> TaskResult:
                 conflict_columns=["id"],
             )
             logger.exception("Unexpected error during training")
-            return _build_error_result(job_id, str(e))
+            raise
         
 
 @shared_task(
@@ -367,19 +336,9 @@ def train_temporal_task(self, job_payload: dict) -> TaskResult:
     retry_backoff_max=120,
     retry_jitter=True,
 )
+
 def train_all_products_task(self, job_payload: dict) -> TaskResult:
-    """
-    Batch-trains one TemporalPipeline per unique product in the dataset.
- 
-    Expected job_payload keys
-    -------------------------
-    s3_key          : S3 object key for the full dataset (parquet).
-    product_col     : Column that identifies each product (e.g. "product_id").
-    target_column   : Column to forecast (e.g. "revenue").
-    datetime_column : Date/time column (e.g. "date").
-    forecast_horizon: Optional int — default 30.
-    idempotency_key : Optional job ID.
-    """
+   
     from core.pipelines.temporal_pipeline import train_all_products
  
     task_id  = self.request.id
@@ -439,8 +398,16 @@ def train_all_products_task(self, job_payload: dict) -> TaskResult:
                     s3_client       = s3,
                     config          = config,
                 )
+                if not results:
+                    raise RuntimeError(
+                        f"No products met the minimum row threshold for training "
+                        f"(product_col={product_col!r}). Zero models trained."
+                    )
  
                 progress.report("finalising", percent=90)
+
+            products_trained = list(results.keys()) if results else []
+            total_trained = len(products_trained)
  
             # Mark completed 
             PostgresClient.upsert(
@@ -458,8 +425,8 @@ def train_all_products_task(self, job_payload: dict) -> TaskResult:
                 "status":           STATUS_SUCCESS,
                 "task_id":          task_id,
                 "job_id":           job_id,
-                "products_trained": list(results.keys()),
-                "total_trained":    len(results),
+                "products_trained": products_trained,
+                "total_trained":    total_trained,
                 "timestamp":        datetime.now(timezone.utc).isoformat(),
             }
  
